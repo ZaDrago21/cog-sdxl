@@ -13,7 +13,7 @@ import torch
 from diffusers import AutoPipelineForText2Image, AutoPipelineForImage2Image, AutoPipelineForInpainting, AutoencoderKL
 from schedulers import SDXLCompatibleSchedulers # schedulers.py
 from loras import SDXLMultiLoRAHandler # loras.py
-from compel import Compel
+from compel import Compel, ReturnedEmbeddingsType
 
 import os
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
@@ -498,16 +498,18 @@ class Predictor(BasePredictor):
                    tokenizer=[pipeline.tokenizer, pipeline.tokenizer_2],
                    text_encoder=[pipeline.text_encoder, pipeline.text_encoder_2],
                    device='cuda',
+                   returned_embeddings_type=ReturnedEmbeddingsType.PENULTIMATE_HIDDEN_STATES_NON_NORMALIZED, 
+                   requires_pooled=[False, True],
+                   truncate_long_prompts=False
                )
+               
+               conditioning, pooled = compel([prompt, negative_prompt])
 
-               # Build conditioning tensors
-               prompt_embeds, pooled_prompt_embeds = compel.build_conditioning_tensor(prompt)
-               negative_prompt_embeds, negative_pooled_prompt_embeds = compel.build_conditioning_tensor(negative_prompt)
 
-               gen_kwargs["prompt_embeds"] = prompt_embeds
-               gen_kwargs["negative_prompt_embeds"] = negative_prompt_embeds
-               gen_kwargs["pooled_prompt_embeds"] = pooled_prompt_embeds
-               gen_kwargs["negative_pooled_prompt_embeds"] = negative_pooled_prompt_embeds
+               gen_kwargs["prompt_embeds"] = conditioning[0:1]
+               gen_kwargs["negative_prompt_embeds"] = conditioning[1:2]
+               gen_kwargs["pooled_prompt_embeds"] = pooled[0:1]
+               gen_kwargs["negative_pooled_prompt_embeds"] = pooled[1:2]
             else:
                 gen_kwargs["prompt"] = prompt
                 gen_kwargs["negative_prompt"] = negative_prompt
