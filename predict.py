@@ -13,6 +13,7 @@ import torch
 from diffusers import AutoPipelineForText2Image, AutoPipelineForImage2Image, AutoPipelineForInpainting, AutoencoderKL
 from schedulers import SDXLCompatibleSchedulers # schedulers.py
 from loras import SDXLMultiLoRAHandler # loras.py
+from compel import Compel
 
 import os
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
@@ -492,24 +493,21 @@ class Predictor(BasePredictor):
             self.loras.process(loras, pipeline)    
             
             if prompt_emebding:
-                   prompt_embeds, negative_prompt_embeds = None, None
-                   pooled_prompt_embeds, negative_pooled_prompt_embeds = None, None
+               # Initialize Compel with both sets of tokenizers and text encoders
+               compel = Compel(
+                   tokenizer=[pipeline.tokenizer, pipeline.tokenizer_2],
+                   text_encoder=[pipeline.text_encoder, pipeline.text_encoder_2],
+                   device='cuda',
+               )
 
-                   # Use the pipeline's encode_prompt method
-                   prompt_embeds, negative_prompt_embeds, pooled_prompt_embeds, negative_pooled_prompt_embeds = pipeline.encode_prompt(
-                       prompt=prompt,
-                       negative_prompt=negative_prompt,
-                       device='cuda',
-                       num_images_per_prompt=batch_size,
-                       do_classifier_free_guidance=True,
-                       lora_scale=lora_scale,
-                       clip_skip=clip_skip - 1,
-                   )
+               # Build conditioning tensors
+               prompt_embeds, pooled_prompt_embeds = compel.build_conditioning_tensor(prompt)
+               negative_prompt_embeds, negative_pooled_prompt_embeds = compel.build_conditioning_tensor(negative_prompt)
 
-                   gen_kwargs["prompt_embeds"] = prompt_embeds
-                   gen_kwargs["negative_prompt_embeds"] = negative_prompt_embeds
-                   gen_kwargs["pooled_prompt_embeds"] = pooled_prompt_embeds
-                   gen_kwargs["negative_pooled_prompt_embeds"] = negative_pooled_prompt_embeds
+               gen_kwargs["prompt_embeds"] = prompt_embeds
+               gen_kwargs["negative_prompt_embeds"] = negative_prompt_embeds
+               gen_kwargs["pooled_prompt_embeds"] = pooled_prompt_embeds
+               gen_kwargs["negative_pooled_prompt_embeds"] = negative_pooled_prompt_embeds
             else:
                 gen_kwargs["prompt"] = prompt
                 gen_kwargs["negative_prompt"] = negative_prompt
