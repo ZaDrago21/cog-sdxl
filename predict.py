@@ -503,6 +503,8 @@ class Predictor(BasePredictor):
         batch_size: int = Input(description="Number of images to generate (1-4), note if you set this to 4, some high resolution gens might fail because of not enough VRAM", default=1, ge=1, le=4),
         seed: int = Input(description="The seed used when generating, set to -1 for random seed", default=-1),
         lora_scale: float = Input(description="Lora scale for all loras in weighting prompts the <lora:url:1.0> 1.0 will be ignored only lora_scale will be applied", default=1.0),
+        prompt_emebding: bool = Input(description="if to enable 77+ token support by converting to embeds otherwise will use previous prompt/neg prompts.", default=False),
+
         
     ) -> list[Path]:
         if prompt == "__ignore__":
@@ -522,9 +524,7 @@ class Predictor(BasePredictor):
         pipeline = self.pipelines.get_pipeline(model, None if vae == BAKEDIN_VAE_LABEL else vae, scheduler)
         
         
-        try:
-            self.loras.process(loras, pipeline)
-            
+        if prompt_emebding:
             (
                 prompt_embeds,
                 negative_prompt_embeds,
@@ -538,12 +538,16 @@ class Predictor(BasePredictor):
                 clip_skip=clip_skip,
                 lora_scale=lora_scale,
             )
-            
             gen_kwargs["prompt_embeds"] = prompt_embeds
             gen_kwargs["negative_prompt_embeds"] = negative_prompt_embeds
             gen_kwargs["pooled_prompt_embeds"] = pooled_prompt_embeds
             gen_kwargs["negative_pooled_prompt_embeds"] = negative_pooled_prompt_embeds     
-                   
+        else:
+            gen_kwargs["prompt"] = prompt
+            gen_kwargs["negative_prompt"] = negative_prompt
+        
+        try:
+            self.loras.process(loras, pipeline)    
             
             if image:
                 gen_kwargs["image"] = utils.scale_and_crop(image, width, height)
