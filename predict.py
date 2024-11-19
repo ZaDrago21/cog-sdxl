@@ -251,31 +251,11 @@ def get_weighted_text_embeddings_sdxl(
     clip_skip: Optional[int] = None,
     lora_scale: Optional[int] = None,
 ):
-    """
-    This function can process long prompt with weights, no length limitation
-    for Stable Diffusion XL
-
-    Args:
-        pipe (StableDiffusionPipeline)
-        prompt (str)
-        prompt_2 (str)
-        neg_prompt (str)
-        neg_prompt_2 (str)
-        num_images_per_prompt (int)
-        device (torch.device)
-        clip_skip (int)
-    Returns:
-        prompt_embeds (torch.Tensor)
-        neg_prompt_embeds (torch.Tensor)
-    """
     device = device or pipe._execution_device
 
-    # set lora scale so that monkey patched LoRA
-    # function of text encoder can correctly access it
     if lora_scale is not None and isinstance(pipe, StableDiffusionXLLoraLoaderMixin):
         pipe._lora_scale = lora_scale
 
-        # dynamically adjust the LoRA scale
         if pipe.text_encoder is not None:
             if not USE_PEFT_BACKEND:
                 adjust_lora_scale_text_encoder(pipe.text_encoder, lora_scale)
@@ -313,74 +293,54 @@ def get_weighted_text_embeddings_sdxl(
     prompt_tokens_2, prompt_weights_2 = get_prompts_tokens_with_weights(pipe.tokenizer_2, prompt_t2)
     neg_prompt_tokens_2, neg_prompt_weights_2 = get_prompts_tokens_with_weights(pipe.tokenizer_2, neg_prompt_t2)
 
-    # padding the shorter one for prompt set 1
-    prompt_token_len = len(prompt_tokens)
-    neg_prompt_token_len = len(neg_prompt_tokens)
+    # Padding to match lengths
+    max_len = max(len(prompt_tokens), len(neg_prompt_tokens))
+    prompt_tokens += [eos] * (max_len - len(prompt_tokens))
+    prompt_weights += [1.0] * (max_len - len(prompt_weights))
+    neg_prompt_tokens += [eos] * (max_len - len(neg_prompt_tokens))
+    neg_prompt_weights += [1.0] * (max_len - len(neg_prompt_weights))
 
-    if prompt_token_len > neg_prompt_token_len:
-        # padding the neg_prompt with eos token
-        neg_prompt_tokens = neg_prompt_tokens + [eos] * abs(prompt_token_len - neg_prompt_token_len)
-        neg_prompt_weights = neg_prompt_weights + [1.0] * abs(prompt_token_len - neg_prompt_token_len)
-    else:
-        # padding the prompt
-        prompt_tokens = prompt_tokens + [eos] * abs(prompt_token_len - neg_prompt_token_len)
-        prompt_weights = prompt_weights + [1.0] * abs(prompt_token_len - neg_prompt_token_len)
-
-    # padding the shorter one for token set 2
-    prompt_token_len_2 = len(prompt_tokens_2)
-    neg_prompt_token_len_2 = len(neg_prompt_tokens_2)
-
-    if prompt_token_len_2 > neg_prompt_token_len_2:
-        # padding the neg_prompt with eos token
-        neg_prompt_tokens_2 = neg_prompt_tokens_2 + [eos] * abs(prompt_token_len_2 - neg_prompt_token_len_2)
-        neg_prompt_weights_2 = neg_prompt_weights_2 + [1.0] * abs(prompt_token_len_2 - neg_prompt_token_len_2)
-    else:
-        # padding the prompt
-        prompt_tokens_2 = prompt_tokens_2 + [eos] * abs(prompt_token_len_2 - neg_prompt_token_len_2)
-        prompt_weights_2 = prompt_weights + [1.0] * abs(prompt_token_len_2 - neg_prompt_token_len_2)
+    max_len_2 = max(len(prompt_tokens_2), len(neg_prompt_tokens_2))
+    prompt_tokens_2 += [eos] * (max_len_2 - len(prompt_tokens_2))
+    prompt_weights_2 += [1.0] * (max_len_2 - len(prompt_weights_2))
+    neg_prompt_tokens_2 += [eos] * (max_len_2 - len(neg_prompt_tokens_2))
+    neg_prompt_weights_2 += [1.0] * (max_len_2 - len(neg_prompt_weights_2))
 
     embeds = []
     neg_embeds = []
+    pooled_embeds_list = []
+    negative_pooled_embeds_list = []
 
     prompt_token_groups, prompt_weight_groups = group_tokens_and_weights(prompt_tokens.copy(), prompt_weights.copy())
-
     neg_prompt_token_groups, neg_prompt_weight_groups = group_tokens_and_weights(
         neg_prompt_tokens.copy(), neg_prompt_weights.copy()
     )
-
     prompt_token_groups_2, prompt_weight_groups_2 = group_tokens_and_weights(
         prompt_tokens_2.copy(), prompt_weights_2.copy()
     )
-
     neg_prompt_token_groups_2, neg_prompt_weight_groups_2 = group_tokens_and_weights(
         neg_prompt_tokens_2.copy(), neg_prompt_weights_2.copy()
     )
 
-    # get prompt embeddings one by one is not working.
     for i in range(len(prompt_token_groups)):
-        # get positive prompt embeddings with weights
+        # Positive prompt
         token_tensor = torch.tensor([prompt_token_groups[i]], dtype=torch.long, device=device)
-        weight_tensor = torch.tensor(prompt_weight_groups[i], dtype=torch.float16, device=device)
-
+        weight_tensor = torch.tensor(prompt_weight_groups[i], dtype=torch.float32, device=device)
         token_tensor_2 = torch.tensor([prompt_token_groups_2[i]], dtype=torch.long, device=device)
 
-        # use first text encoder
         prompt_embeds_1 = pipe.text_encoder(token_tensor.to(device), output_hidden_states=True)
-
-        # use second text encoder
         prompt_embeds_2 = pipe.text_encoder_2(token_tensor_2.to(device), output_hidden_states=True)
-        pooled_prompt_embeds = prompt_embeds_2[0]
+        pooled_embeds_list.append(prompt_embeds_2[0])
 
         if clip_skip is None:
             prompt_embeds_1_hidden_states = prompt_embeds_1.hidden_states[-2]
             prompt_embeds_2_hidden_states = prompt_embeds_2.hidden_states[-2]
         else:
-            # "2" because SDXL always indexes from the penultimate layer.
             prompt_embeds_1_hidden_states = prompt_embeds_1.hidden_states[-(clip_skip + 2)]
             prompt_embeds_2_hidden_states = prompt_embeds_2.hidden_states[-(clip_skip + 2)]
 
         prompt_embeds_list = [prompt_embeds_1_hidden_states, prompt_embeds_2_hidden_states]
-        token_embedding = torch.concat(prompt_embeds_list, dim=-1).squeeze(0)
+        token_embedding = torch.cat(prompt_embeds_list, dim=-1).squeeze(0)
 
         for j in range(len(weight_tensor)):
             if weight_tensor[j] != 1.0:
@@ -391,22 +351,24 @@ def get_weighted_text_embeddings_sdxl(
         token_embedding = token_embedding.unsqueeze(0)
         embeds.append(token_embedding)
 
-        # get negative prompt embeddings with weights
+        # Negative prompt
         neg_token_tensor = torch.tensor([neg_prompt_token_groups[i]], dtype=torch.long, device=device)
+        neg_weight_tensor = torch.tensor(neg_prompt_weight_groups[i], dtype=torch.float32, device=device)
         neg_token_tensor_2 = torch.tensor([neg_prompt_token_groups_2[i]], dtype=torch.long, device=device)
-        neg_weight_tensor = torch.tensor(neg_prompt_weight_groups[i], dtype=torch.float16, device=device)
 
-        # use first text encoder
         neg_prompt_embeds_1 = pipe.text_encoder(neg_token_tensor.to(device), output_hidden_states=True)
-        neg_prompt_embeds_1_hidden_states = neg_prompt_embeds_1.hidden_states[-2]
-
-        # use second text encoder
         neg_prompt_embeds_2 = pipe.text_encoder_2(neg_token_tensor_2.to(device), output_hidden_states=True)
-        neg_prompt_embeds_2_hidden_states = neg_prompt_embeds_2.hidden_states[-2]
-        negative_pooled_prompt_embeds = neg_prompt_embeds_2[0]
+        negative_pooled_embeds_list.append(neg_prompt_embeds_2[0])
+
+        if clip_skip is None:
+            neg_prompt_embeds_1_hidden_states = neg_prompt_embeds_1.hidden_states[-2]
+            neg_prompt_embeds_2_hidden_states = neg_prompt_embeds_2.hidden_states[-2]
+        else:
+            neg_prompt_embeds_1_hidden_states = neg_prompt_embeds_1.hidden_states[-(clip_skip + 2)]
+            neg_prompt_embeds_2_hidden_states = neg_prompt_embeds_2.hidden_states[-(clip_skip + 2)]
 
         neg_prompt_embeds_list = [neg_prompt_embeds_1_hidden_states, neg_prompt_embeds_2_hidden_states]
-        neg_token_embedding = torch.concat(neg_prompt_embeds_list, dim=-1).squeeze(0)
+        neg_token_embedding = torch.cat(neg_prompt_embeds_list, dim=-1).squeeze(0)
 
         for z in range(len(neg_weight_tensor)):
             if neg_weight_tensor[z] != 1.0:
@@ -420,30 +382,33 @@ def get_weighted_text_embeddings_sdxl(
     prompt_embeds = torch.cat(embeds, dim=1)
     negative_prompt_embeds = torch.cat(neg_embeds, dim=1)
 
+    # Combine pooled embeddings
+    pooled_prompt_embeds = torch.mean(torch.stack(pooled_embeds_list), dim=0)
+    negative_pooled_prompt_embeds = torch.mean(torch.stack(negative_pooled_embeds_list), dim=0)
+
+    # Ensure correct shapes
     bs_embed, seq_len, _ = prompt_embeds.shape
-    # duplicate text embeddings for each generation per prompt, using mps friendly method
     prompt_embeds = prompt_embeds.repeat(1, num_images_per_prompt, 1)
     prompt_embeds = prompt_embeds.view(bs_embed * num_images_per_prompt, seq_len, -1)
-
-    seq_len = negative_prompt_embeds.shape[1]
     negative_prompt_embeds = negative_prompt_embeds.repeat(1, num_images_per_prompt, 1)
     negative_prompt_embeds = negative_prompt_embeds.view(bs_embed * num_images_per_prompt, seq_len, -1)
 
-    pooled_prompt_embeds = pooled_prompt_embeds.repeat(1, num_images_per_prompt, 1).view(
-        bs_embed * num_images_per_prompt, -1
-    )
-    negative_pooled_prompt_embeds = negative_pooled_prompt_embeds.repeat(1, num_images_per_prompt, 1).view(
-        bs_embed * num_images_per_prompt, -1
-    )
+    # Repeat pooled embeds
+    pooled_prompt_embeds = pooled_prompt_embeds.repeat(num_images_per_prompt, 1)
+    negative_pooled_prompt_embeds = negative_pooled_prompt_embeds.repeat(num_images_per_prompt, 1)
+
+    # Move embeddings to correct device and dtype
+    prompt_embeds = prompt_embeds.to(dtype=pipe.text_encoder_2.dtype, device=device)
+    negative_prompt_embeds = negative_prompt_embeds.to(dtype=pipe.text_encoder_2.dtype, device=device)
+    pooled_prompt_embeds = pooled_prompt_embeds.to(dtype=pipe.text_encoder_2.dtype, device=device)
+    negative_pooled_prompt_embeds = negative_pooled_prompt_embeds.to(dtype=pipe.text_encoder_2.dtype, device=device)
 
     if pipe.text_encoder is not None:
         if isinstance(pipe, StableDiffusionXLLoraLoaderMixin) and USE_PEFT_BACKEND:
-            # Retrieve the original scale by scaling back the LoRA layers
             unscale_lora_layers(pipe.text_encoder, lora_scale)
 
     if pipe.text_encoder_2 is not None:
         if isinstance(pipe, StableDiffusionXLLoraLoaderMixin) and USE_PEFT_BACKEND:
-            # Retrieve the original scale by scaling back the LoRA layers
             unscale_lora_layers(pipe.text_encoder_2, lora_scale)
 
     return prompt_embeds, negative_prompt_embeds, pooled_prompt_embeds, negative_pooled_prompt_embeds
@@ -522,32 +487,33 @@ class Predictor(BasePredictor):
             "pag_scale": pag_scale, "clip_skip": clip_skip - 1, "num_inference_steps": steps, "num_images_per_prompt": batch_size,
         }
         pipeline = self.pipelines.get_pipeline(model, None if vae == BAKEDIN_VAE_LABEL else vae, scheduler)
-        
-        
-        if prompt_emebding:
-            (
-                prompt_embeds,
-                negative_prompt_embeds,
-                pooled_prompt_embeds,
-                negative_pooled_prompt_embeds,
-            ) = get_weighted_text_embeddings_sdxl(
-                pipe=pipeline,
-                prompt=prompt,
-                neg_prompt=negative_prompt,
-                num_images_per_prompt=batch_size,
-                clip_skip=clip_skip,
-                lora_scale=lora_scale,
-            )
-            gen_kwargs["prompt_embeds"] = prompt_embeds
-            gen_kwargs["negative_prompt_embeds"] = negative_prompt_embeds
-            gen_kwargs["pooled_prompt_embeds"] = pooled_prompt_embeds
-            gen_kwargs["negative_pooled_prompt_embeds"] = negative_pooled_prompt_embeds     
-        else:
-            gen_kwargs["prompt"] = prompt
-            gen_kwargs["negative_prompt"] = negative_prompt
-        
+
         try:
             self.loras.process(loras, pipeline)    
+            
+            if prompt_emebding:
+                (
+                    prompt_embeds,
+                    negative_prompt_embeds,
+                    pooled_prompt_embeds,
+                    negative_pooled_prompt_embeds,
+                ) = get_weighted_text_embeddings_sdxl(
+                    pipe=pipeline,
+                    prompt=prompt,
+                    neg_prompt=negative_prompt,
+                    num_images_per_prompt=batch_size,
+                    clip_skip=clip_skip,
+                    lora_scale=lora_scale,
+                )
+
+                gen_kwargs["prompt_embeds"] = prompt_embeds
+                gen_kwargs["negative_prompt_embeds"] = negative_prompt_embeds
+                gen_kwargs["pooled_prompt_embeds"] = pooled_prompt_embeds
+                gen_kwargs["negative_pooled_prompt_embeds"] = negative_pooled_prompt_embeds     
+            else:
+                gen_kwargs["prompt"] = prompt
+                gen_kwargs["negative_prompt"] = negative_prompt
+            
             
             if image:
                 gen_kwargs["image"] = utils.scale_and_crop(image, width, height)
