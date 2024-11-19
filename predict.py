@@ -491,7 +491,7 @@ class Predictor(BasePredictor):
         try:
             self.loras.process(loras, pipeline)    
             
-            if prompt_embedding:
+            if prompt_emebding:
                    prompt_embeds, negative_prompt_embeds = None, None
                    pooled_prompt_embeds, negative_pooled_prompt_embeds = None, None
 
