@@ -491,25 +491,25 @@ class Predictor(BasePredictor):
         try:
             self.loras.process(loras, pipeline)    
             
-            if prompt_emebding:
-                (
-                    prompt_embeds,
-                    negative_prompt_embeds,
-                    pooled_prompt_embeds,
-                    negative_pooled_prompt_embeds,
-                ) = get_weighted_text_embeddings_sdxl(
-                    pipe=pipeline,
-                    prompt=prompt,
-                    neg_prompt=negative_prompt,
-                    num_images_per_prompt=batch_size,
-                    clip_skip=clip_skip,
-                    lora_scale=lora_scale,
-                )
+            if prompt_embedding:
+                   prompt_embeds, negative_prompt_embeds = None, None
+                   pooled_prompt_embeds, negative_pooled_prompt_embeds = None, None
 
-                gen_kwargs["prompt_embeds"] = prompt_embeds
-                gen_kwargs["negative_prompt_embeds"] = negative_prompt_embeds
-                gen_kwargs["pooled_prompt_embeds"] = pooled_prompt_embeds
-                gen_kwargs["negative_pooled_prompt_embeds"] = negative_pooled_prompt_embeds     
+                   # Use the pipeline's encode_prompt method
+                   prompt_embeds, negative_prompt_embeds, pooled_prompt_embeds, negative_pooled_prompt_embeds = pipeline.encode_prompt(
+                       prompt=prompt,
+                       negative_prompt=negative_prompt,
+                       device='cuda',
+                       num_images_per_prompt=batch_size,
+                       do_classifier_free_guidance=True,
+                       lora_scale=lora_scale,
+                       clip_skip=clip_skip - 1,
+                   )
+
+                   gen_kwargs["prompt_embeds"] = prompt_embeds
+                   gen_kwargs["negative_prompt_embeds"] = negative_prompt_embeds
+                   gen_kwargs["pooled_prompt_embeds"] = pooled_prompt_embeds
+                   gen_kwargs["negative_pooled_prompt_embeds"] = negative_pooled_prompt_embeds
             else:
                 gen_kwargs["prompt"] = prompt
                 gen_kwargs["negative_prompt"] = negative_prompt
