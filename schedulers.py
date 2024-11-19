@@ -38,6 +38,29 @@ class SDXLCompatibleSchedulers(Enum):
     DPMPlusPlus2M = ("DPM++ 2M", DPMSolverMultistepScheduler, {})
     DPMPlusPlus2MKarras = ("DPM++ 2M Karras", DPMSolverMultistepScheduler, {"use_karras_sigmas": True})
     DPMPlusPlus2MSDE = ("DPM++ 2M SDE", DPMSolverMultistepScheduler, {"algorithm_type": "sde-dpmsolver++"})
+    
+    
+    DPM2_VPRED = ("DPM2 v_prediction", KDPM2DiscreteScheduler, {
+        "prediction_type": "v_prediction",
+        "rescale_betas_zero_snr": True
+    })
+    PNDM_VPRED = ("PNDM v_prediction", PNDMScheduler, {
+        "prediction_type": "v_prediction",
+        "rescale_betas_zero_snr": True
+    })
+    Euler_VPRED = ("Euler v_prediction", EulerDiscreteScheduler, {
+        "prediction_type": "v_prediction",
+        "rescale_betas_zero_snr": True
+    })
+    LMS_VPRED = ("LMS v_prediction", LMSDiscreteScheduler, {
+        "prediction_type": "v_prediction",
+        "rescale_betas_zero_snr": True
+    })
+    DDIM_VPRED = ("DDIM v_prediction", DDIMScheduler, {
+        "prediction_type": "v_prediction",
+        "rescale_betas_zero_snr": True
+    })
+    
 
     def __init__(self, string_name, scheduler_class, init_args):
         self.string_name = string_name
