@@ -26,6 +26,14 @@ MAX_LORA_CACHE_BYTES = 137438953472 # 128 GB.
 TEXTUAL_INVERSION_PATHS = finders.find_textual_inversions("textual_inversions")
 
 SCHEDULER_NAMES = SDXLCompatibleSchedulers.get_names()
+SCHEDULER_NAMES.extend([
+"DPM2 v_prediction",
+"PNDM v_prediction",
+"Euler v_prediction",
+"LMS v_prediction",
+"DDIM v_prediction"
+])
+
 
 DEFAULT_MODEL = MODEL_NAMES[0] if len(MODEL_NAMES) else None
 
