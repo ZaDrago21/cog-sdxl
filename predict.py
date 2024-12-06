@@ -14,7 +14,7 @@ from diffusers import AutoPipelineForText2Image, AutoPipelineForImage2Image, Aut
 from schedulers import SDXLCompatibleSchedulers # schedulers.py
 from loras import SDXLMultiLoRAHandler # loras.py
 from compel import Compel, ReturnedEmbeddingsType
-
+import re
 import os
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 from transformers import (
@@ -35,6 +35,89 @@ from diffusers.utils import (
     scale_lora_layers,
     unscale_lora_layers,
 )
+
+def parse_generic_weights(text):
+    pattern = r'\(([^:]+):\s*([^)]+?)\s*\)'
+    matches = re.finditer(pattern, text)
+    results = []
+    for match in matches:
+        original_match = match.group(0)  
+        content = match.group(1).strip() 
+        number_str = match.group(2).strip()
+        try:
+            number = float(number_str)  
+        except ValueError:
+            number = None
+        results.append((original_match, content, number))
+    for item in results:
+        text = text.replace(item[0], "("+item[1]+")"+str(item[2]))
+    return text
+
+
+def parse_nai_weights(text):
+    pattern = r'(\{+)(\w+)(\}+)|(\[+)([^\]]+)(\]+)'
+    matches = re.finditer(pattern, text)
+    results = {}
+    for match in matches:
+        original_match = match.group(0)
+        if match.group(1):
+            num_open_braces = len(match.group(1))
+            num_close_braces = len(match.group(3))
+            num_braces = min(num_open_braces, num_close_braces)
+            name = match.group(2)
+            results[name] = (original_match, name, num_braces)
+        elif match.group(4):
+            num_open_brackets = len(match.group(4))
+            num_close_brackets = len(match.group(6))
+            num_braces = min(num_open_brackets, num_close_brackets)
+            name = match.group(5)
+            results[name] = (original_match, name, num_braces)     
+    for item, result in results.items():
+        if result[0][0] == "[":
+            calculated_value = round(1.0 / (1.05**result[2]), 4)
+        else:
+            calculated_value = round(1.05**result[2], 4)
+        text = text.replace(result[0], "("+result[1]+")"+str(calculated_value))
+    return text
+    
+def parse_webui_weights(text):
+    pattern = r'(?<!_|\\)(\(+)(\w+)(\)+)(?!_|\\|\d+)|(\[+)([^\]]+)(\]+)(?!_|\\|\d+)'
+    matches = re.finditer(pattern, text)
+    results = {}
+    for match in matches:
+        original_match = match.group(0)
+        if match.group(1):
+            num_open_braces = len(match.group(1))
+            num_close_braces = len(match.group(3))
+            num_braces = min(num_open_braces, num_close_braces)
+            name = match.group(2)
+            results[name] = (original_match, name, num_braces)
+        elif match.group(4):
+            num_open_brackets = len(match.group(4))
+            num_close_brackets = len(match.group(6))
+            num_braces = min(num_open_brackets, num_close_brackets)
+            name = match.group(5)
+            results[name] = (original_match, name, num_braces)     
+    for item, result in results.items():
+        if result[0][0] == "[":
+            calculated_value = round(1.0 / (1.1**result[2]), 4)
+        else:
+            calculated_value = round(1.1**result[2], 4)
+        text = text.replace(result[0], "("+result[1]+")"+str(calculated_value))
+    return text
+
+def parse_weights(text):
+    if "{" in text: # preffer to use nai weighting system first. {1.05} [0.95]
+        text = parse_nai_weights(text)
+        text = parse_webui_weights(text)
+        text = parse_generic_weights(text)
+    else: # preffer to use webui weights (1.1) [0.9]
+        text = parse_webui_weights(text) 
+        text = parse_nai_weights(text)
+        text = parse_generic_weights(text)
+    return text
+
+
 
 # Cog will only run this class in a single thread.
 class Predictor(BasePredictor):
@@ -86,7 +169,7 @@ class Predictor(BasePredictor):
         if prepend_preprompt:
             prompt = DEFAULT_POS_PREPROMPT + prompt
             negative_prompt = DEFAULT_NEG_PREPROMPT + negative_prompt
-            
+         prompt = parse_weights(prompt)    
             
         
             
