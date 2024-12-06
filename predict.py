@@ -170,7 +170,7 @@ class Predictor(BasePredictor):
             prompt = DEFAULT_POS_PREPROMPT + prompt
             negative_prompt = DEFAULT_NEG_PREPROMPT + negative_prompt
          prompt = parse_weights(prompt)    
-            
+         negative_prompt = parse_weights(negative_prompt)
         
             
             
