@@ -57,127 +57,43 @@ class Predictor(BasePredictor):
 
     def predict(
         self,
-        model: str = Input(
-            description="The model to use", 
-            default=DEFAULT_MODEL, 
-            choices=MODEL_NAMES
-        ),
-        vae: Optional[str] = Input(
+        model: str = Input(description="The model to use", default=DEFAULT_MODEL, choices=MODEL_NAMES),
+        vae: str = Input(
             description="The VAE to use",
             default=DEFAULT_VAE_NAME,
             choices=list(dict.fromkeys([DEFAULT_VAE_NAME, BAKEDIN_VAE_LABEL] + VAE_NAMES + MODEL_NAMES)),
         ),
-        prompt: str = Input(
-            description="The prompt", 
-            default=DEFAULT_POSITIVE_PROMPT
-        ),
-        image: Optional[Path] = Input(
-            description="The image for image to image or as the base for inpainting (Will be scaled then cropped to the set width and height)",
-            default=None,
-        ),
-        mask: Optional[Path] = Input(
-            description="The mask for inpainting; white areas will be modified and black preserved (Will be scaled then cropped to the set width and height)",
-            default=None,
-        ),
-        loras: Optional[str] = Input(
+        prompt: str = Input(description="The prompt", default=DEFAULT_POSITIVE_PROMPT),
+        image: Path = Input(description="The image for image to image or as the base for inpainting (Will be scaled then cropped to the set width and height)", default=None),
+        mask: Path = Input(description="The mask for inpainting, white areas will be modified and black preserved (Will be scaled then cropped to the set width and height)", default=None),
+        loras: str = Input(
             description="The LoRAs to use, must be either a string with format \"URL:Strength,URL:Strength,...\" (Strength is optional, default to 1), "
                         "or a JSON list dumped as a string containing key \"url\" (Required), \"strength\" (Optional, default to 1), and \"civitai_token\" (Optional, for downloading from CivitAI) "
                         "(NOTICE: Will download the weights, might take a while if the LoRAs are huge or the download is slow, WILL CHARGE WHEN DOWNLOADING)",
             default=DEFAULT_LORA,
         ),
-        negative_prompt: str = Input(
-            description="The negative prompt (For things you don't want)", 
-            default=DEFAULT_NEGATIVE_PROMPT
-        ),
-        cfg_scale: float = Input(
-            description="CFG scale defines how much attention the model pays to the prompt when generating, set to 1 to disable",
-            default=DEFAULT_CFG,
-            ge=1,
-            le=50,
-        ),
-        guidance_rescale: float = Input(
-            description="The amount to rescale CFG generated noise to avoid generating overexposed images, set to 0 or 1 to disable",
-            default=DEFAULT_RESCALE,
-            ge=0,
-            le=5,
-        ),
-        pag_scale: float = Input(
-            description="PAG scale is similar to CFG but it literally makes the result better; it's compatible with CFG too, set to 0 to disable",
-            default=DEFAULT_PAG,
-            ge=0,
-            le=50,
-        ),
-        clip_skip: int = Input(
-            description="How many CLIP layers to skip, 1 is actually no skip",
-            default=DEFAULT_CLIP_SKIP,
-            ge=1,
-        ),
-        width: int = Input(
-            description="The width of the image", 
-            default=DEFAULT_WIDTH, 
-            ge=1, le=4096
-        ),
-        height: int = Input(
-            description="The height of the image", 
-            default=DEFAULT_HEIGHT, 
-            ge=1, le=4096
-        ),
-        prepend_preprompt: bool = Input(
-            description=f"Prepend preprompt (Prompt: \"{DEFAULT_POS_PREPROMPT}\" Negative prompt: \"{DEFAULT_NEG_PREPROMPT}\")",
-            default=True
-        ),
-        scheduler: str = Input(
-            description="The scheduler to use", 
-            default=DEFAULT_SCHEDULER, 
-            choices=SCHEDULER_NAMES
-        ),
-        steps: int = Input(
-            description="The steps when generating", 
-            default=DEFAULT_STEPS, 
-            ge=1, le=100
-        ),
-        strength: float = Input(
-            description="How much noise to add (For image to image and inpainting only)", 
-            default=0.7, 
-            ge=0, le=1
-        ),
-        blur_factor: float = Input(
-            description="The factor to blur the inpainting mask for smoother transition", 
-            default=5, 
-            ge=0
-        ),
-        batch_size: int = Input(
-            description="Number of images to generate (1-4)",
-            default=1, 
-            ge=1, le=4
-        ),
-        seed: int = Input(
-            description="The seed used when generating, set to -1 for random seed", 
-            default=-1
-        ),
-        lora_scale: float = Input(
-            description="Lora scale for all loras in weighting prompts",
-            default=1.0,
-        ),
-        prompt_emebding: bool = Input(
-            description="If to enable 77+ token support by converting to embeds", 
-            default=False
-        ),
-        # --- Hiresfix options ---
-        hiresfix: bool = Input(
-            description="Enable hiresfix mode: Generates a lower resolution base image, then upscales and refines it via img2img.",
-            default=False
-        ),
-        hiresfix_scale: float = Input(
-            description="Scaling factor for hiresfix upscaling (e.g. 2.0, 4.0)",
-            default=2.0, 
-            ge=1.0
-        ),
-        hiresfix_model: str = Input(
-            description="URI or local path to the RealESRGAN model weights for hiresfix.",
-            default="models/upscale/RealESRGAN_x4plus_anime_6B.pth"
-        ),
-    ) -> List[Path]:
+        negative_prompt: str = Input(description="The negative prompt (For things you don't want)", default=DEFAULT_NEGATIVE_PROMPT),
+        cfg_scale: float = Input(description="CFG scale defines how much attention the model pays to the prompt when generating, set to 1 to disable", default=DEFAULT_CFG, ge=1, le=50),
+        guidance_rescale: float = Input(description="The amount to rescale CFG generated noise to avoid generating overexposed images, set to 0 or 1 to disable", default=DEFAULT_RESCALE, ge=0, le=5),
+        pag_scale: float = Input(description="PAG scale is similar to CFG but it literally makes the result better, it's compatible with CFG too, set to 0 to disable", default=DEFAULT_PAG, ge=0, le=50),
+        clip_skip: int = Input(description="How many CLIP layers to skip, 1 is actually no skip, this is the behavior in A1111 so it's aligned to it", default=DEFAULT_CLIP_SKIP, ge=1),
+        width: int = Input(description="The width of the image", default=DEFAULT_WIDTH, ge=1, le=4096),
+        height: int = Input(description="The height of the image", default=DEFAULT_HEIGHT, ge=1, le=4096),
+        prepend_preprompt: bool = Input(description=f"Prepend preprompt (Prompt: \"{DEFAULT_POS_PREPROMPT}\" Negative prompt: \"{DEFAULT_NEG_PREPROMPT}\")", default=True),
+        scheduler: str = Input(description="The scheduler to use", default=DEFAULT_SCHEDULER, choices=SCHEDULER_NAMES),
+        steps: int = Input(description="The steps when generating", default=DEFAULT_STEPS, ge=1, le=100),
+        strength: float = Input(description="How much noise to add (For image to image and inpainting only, larger value indicates more noise added to the input image)", default=0.7, ge=0, le=1),
+        blur_factor: float = Input(description="The factor to blur the inpainting mask for smoother transition between masked and unmasked", default=5, ge=0),
+        batch_size: int = Input(description="Number of images to generate (1-4), note if you set this to 4, some high resolution gens might fail because of not enough VRAM", default=1, ge=1, le=4),
+        seed: int = Input(description="The seed used when generating, set to -1 for random seed", default=-1),
+        lora_scale: float = Input(description="Lora scale for all loras in weighting prompts the <lora:url:1.0> 1.0 will be ignored only lora_scale will be applied", default=1.0),
+        prompt_emebding: bool = Input(description="if to enable 77+ token support by converting to embeds otherwise will use previous prompt/neg prompts.", default=False),
+        hiresfix: bool = Input(description="If to use hiresfix", default=False),
+        hiresfix_model: str = Input(description="URI or local path to the RealESRGAN model weights for hiresfix.", default="models/upscale/RealESRGAN_x4plus_anime_6B.pth"),
+        hiresfix_scale: float = Input(description="The scale factor for the hiresfix model", default=4),
+
+        
+    ) -> list[Path]:
         if prompt == "__ignore__":
             return []
         if prepend_preprompt:
