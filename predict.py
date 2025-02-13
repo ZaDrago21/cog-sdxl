@@ -40,9 +40,6 @@ from diffusers.utils import (
 # Use the external module for parsing weights
 from weighting import parse_weights
 
-# Import RealESRGAN from the top
-from realesrgan import RealESRGAN
-
 import requests
 from urllib.parse import urlparse
 
