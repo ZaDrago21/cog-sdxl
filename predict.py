@@ -1,9 +1,25 @@
+# Torch vision functional tensor fix
+import sys
+import types
+from torchvision.transforms.functional import rgb_to_grayscale
+
+# Create a module for `torchvision.transforms.functional_tensor`
+functional_tensor = types.ModuleType("torchvision.transforms.functional_tensor")
+functional_tensor.rgb_to_grayscale = rgb_to_grayscale
+
+# Add this module to sys.modules so other imports can access it
+sys.modules["torchvision.transforms.functional_tensor"] = functional_tensor
+
+
 from constants import * # constants.py
 DEFAULT_VAE_NAME = BAKEDIN_VAE_LABEL if DEFAULT_VAE_NAME is None else DEFAULT_VAE_NAME
 
 assert len(MODELS) > 0, f"You don't have any model under \"{MODELS_DIR_PATH}\", please put at least 1 model in there!"
 assert DEFAULT_VAE_NAME == BAKEDIN_VAE_LABEL or DEFAULT_VAE_NAME in VAE_NAMES, f"You have set a default VAE but it's not found under \"{VAES_DIR_PATH}\"!"
 assert DEFAULT_CLIP_SKIP >= 1, f"CLIP skip must be at least 1 (which is no skip), this is the behavior in A1111 so it's aligned to it!"
+
+
+
 
 from cog import BasePredictor, Input, Path
 import utils # utils.py
@@ -40,10 +56,15 @@ from diffusers.utils import (
 # Use the external module for parsing weights
 from weighting import parse_weights
 
+# Import RealESRGAN from the top
+from realesrgan import RealESRGANer
+
 import requests
 from urllib.parse import urlparse
 
 import cv2
+
+
 
 # Cog will only run this class in a single thread.
 class Predictor(BasePredictor):
@@ -181,33 +202,11 @@ class Predictor(BasePredictor):
                 gen_kwargs_low["generator"] = torch.Generator(device="cuda").manual_seed(seed)
                 low_res_imgs = pipeline(**gen_kwargs_low).images
 
-                # Upscaling step using RealESRGAN.
-                if "://" in hiresfix_model:
-                    local_upscale_folder = "models/upscale"
-                    os.makedirs(local_upscale_folder, exist_ok=True)
-                    parsed_url = urlparse(hiresfix_model)
-                    filename = os.path.basename(parsed_url.path)
-                    local_model_path = os.path.join(local_upscale_folder, filename)
-                    if not os.path.exists(local_model_path):
-                        print(f"Downloading custom hiresfix model from {hiresfix_model} to {local_model_path} ...")
-                        r = requests.get(hiresfix_model)
-                        r.raise_for_status()
-                        with open(local_model_path, "wb") as f:
-                            f.write(r.content)
-                    hiresfix_model_to_use = local_model_path
-                else:
-                    hiresfix_model_to_use = hiresfix_model
-
-                print("Upscaling low resolution images using Real-ESRGAN via torch.hub...")
-
+                # Upscaling using the realesrgan package directly
+                print("Upscaling low resolution images using realesrgan...")
                 device = torch.device("cuda")
-                # hiresfix_model_to_use should be your local path to the Real‑ESRGAN model weights.
-                upscaler = torch.hub.load(
-                    "xinntao/Real-ESRGAN", 
-                    "real_esrgan", 
-                    model_path=hiresfix_model_to_use, 
-                    scale=int(hiresfix_scale)
-                )
+                upscaler = RealESRGANer(device=device, scale=int(hiresfix_scale))
+                upscaler.load_weights(hiresfix_model)  # hiresfix_model is your path to the pretrained weight file
                 upscaler.to(device)
                 upscaler.eval()
 
