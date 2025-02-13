@@ -10,12 +10,13 @@ import utils # utils.py
 import os
 import random
 import torch
+import numpy as np
+from PIL import Image
 from diffusers import AutoPipelineForText2Image, AutoPipelineForImage2Image, AutoPipelineForInpainting, AutoencoderKL
 from schedulers import SDXLCompatibleSchedulers # schedulers.py
 from loras import SDXLMultiLoRAHandler # loras.py
 from compel import Compel, ReturnedEmbeddingsType
 import re
-import os
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 from transformers import (
     CLIPImageProcessor,
@@ -36,88 +37,14 @@ from diffusers.utils import (
     unscale_lora_layers,
 )
 
-def parse_generic_weights(text):
-    pattern = r'\(([^:]+):\s*([^)]+?)\s*\)'
-    matches = re.finditer(pattern, text)
-    results = []
-    for match in matches:
-        original_match = match.group(0)  
-        content = match.group(1).strip() 
-        number_str = match.group(2).strip()
-        try:
-            number = float(number_str)  
-        except ValueError:
-            number = None
-        results.append((original_match, content, number))
-    for item in results:
-        text = text.replace(item[0], "("+item[1]+")"+str(item[2]))
-    return text
+# Use the external module for parsing weights
+from weighting import parse_weights
 
+# Import RealESRGAN from the top
+from realesrgan import RealESRGAN
 
-def parse_nai_weights(text):
-    pattern = r'(\{+)(\w+)(\}+)|(\[+)([^\]]+)(\]+)'
-    matches = re.finditer(pattern, text)
-    results = {}
-    for match in matches:
-        original_match = match.group(0)
-        if match.group(1):
-            num_open_braces = len(match.group(1))
-            num_close_braces = len(match.group(3))
-            num_braces = min(num_open_braces, num_close_braces)
-            name = match.group(2)
-            results[name] = (original_match, name, num_braces)
-        elif match.group(4):
-            num_open_brackets = len(match.group(4))
-            num_close_brackets = len(match.group(6))
-            num_braces = min(num_open_brackets, num_close_brackets)
-            name = match.group(5)
-            results[name] = (original_match, name, num_braces)     
-    for item, result in results.items():
-        if result[0][0] == "[":
-            calculated_value = round(1.0 / (1.05**result[2]), 4)
-        else:
-            calculated_value = round(1.05**result[2], 4)
-        text = text.replace(result[0], "("+result[1]+")"+str(calculated_value))
-    return text
-    
-def parse_webui_weights(text):
-    pattern = r'(?<!_|\\)(\(+)(\w+)(\)+)(?!_|\\|\d+)|(\[+)([^\]]+)(\]+)(?!_|\\|\d+)'
-    matches = re.finditer(pattern, text)
-    results = {}
-    for match in matches:
-        original_match = match.group(0)
-        if match.group(1):
-            num_open_braces = len(match.group(1))
-            num_close_braces = len(match.group(3))
-            num_braces = min(num_open_braces, num_close_braces)
-            name = match.group(2)
-            results[name] = (original_match, name, num_braces)
-        elif match.group(4):
-            num_open_brackets = len(match.group(4))
-            num_close_brackets = len(match.group(6))
-            num_braces = min(num_open_brackets, num_close_brackets)
-            name = match.group(5)
-            results[name] = (original_match, name, num_braces)     
-    for item, result in results.items():
-        if result[0][0] == "[":
-            calculated_value = round(1.0 / (1.1**result[2]), 4)
-        else:
-            calculated_value = round(1.1**result[2], 4)
-        text = text.replace(result[0], "("+result[1]+")"+str(calculated_value))
-    return text
-
-def parse_weights(text):
-    if "{" in text: # preffer to use nai weighting system first. {1.05} [0.95]
-        text = parse_nai_weights(text)
-        text = parse_webui_weights(text)
-        text = parse_generic_weights(text)
-    else: # preffer to use webui weights (1.1) [0.9]
-        text = parse_webui_weights(text) 
-        text = parse_nai_weights(text)
-        text = parse_generic_weights(text)
-    return text
-
-
+import requests
+from urllib.parse import urlparse
 
 # Cog will only run this class in a single thread.
 class Predictor(BasePredictor):
@@ -137,8 +64,14 @@ class Predictor(BasePredictor):
             choices=list(dict.fromkeys([DEFAULT_VAE_NAME, BAKEDIN_VAE_LABEL] + VAE_NAMES + MODEL_NAMES)),
         ),
         prompt: str = Input(description="The prompt", default=DEFAULT_POSITIVE_PROMPT),
-        image: Path = Input(description="The image for image to image or as the base for inpainting (Will be scaled then cropped to the set width and height)", default=None),
-        mask: Path = Input(description="The mask for inpainting, white areas will be modified and black preserved (Will be scaled then cropped to the set width and height)", default=None),
+        image: Path = Input(
+            description="The image for image to image or as the base for inpainting (Will be scaled then cropped to the set width and height)",
+            default=None,
+        ),
+        mask: Path = Input(
+            description="The mask for inpainting; white areas will be modified and black preserved (Will be scaled then cropped to the set width and height)",
+            default=None,
+        ),
         loras: str = Input(
             description="The LoRAs to use, must be either a string with format \"URL:Strength,URL:Strength,...\" (Strength is optional, default to 1), "
                         "or a JSON list dumped as a string containing key \"url\" (Required), \"strength\" (Optional, default to 1), and \"civitai_token\" (Optional, for downloading from CivitAI) "
@@ -146,23 +79,65 @@ class Predictor(BasePredictor):
             default=DEFAULT_LORA,
         ),
         negative_prompt: str = Input(description="The negative prompt (For things you don't want)", default=DEFAULT_NEGATIVE_PROMPT),
-        cfg_scale: float = Input(description="CFG scale defines how much attention the model pays to the prompt when generating, set to 1 to disable", default=DEFAULT_CFG, ge=1, le=50),
-        guidance_rescale: float = Input(description="The amount to rescale CFG generated noise to avoid generating overexposed images, set to 0 or 1 to disable", default=DEFAULT_RESCALE, ge=0, le=5),
-        pag_scale: float = Input(description="PAG scale is similar to CFG but it literally makes the result better, it's compatible with CFG too, set to 0 to disable", default=DEFAULT_PAG, ge=0, le=50),
-        clip_skip: int = Input(description="How many CLIP layers to skip, 1 is actually no skip, this is the behavior in A1111 so it's aligned to it", default=DEFAULT_CLIP_SKIP, ge=1),
+        cfg_scale: float = Input(
+            description="CFG scale defines how much attention the model pays to the prompt when generating, set to 1 to disable",
+            default=DEFAULT_CFG,
+            ge=1,
+            le=50,
+        ),
+        guidance_rescale: float = Input(
+            description="The amount to rescale CFG generated noise to avoid generating overexposed images, set to 0 or 1 to disable",
+            default=DEFAULT_RESCALE,
+            ge=0,
+            le=5,
+        ),
+        pag_scale: float = Input(
+            description="PAG scale is similar to CFG but it literally makes the result better, it's compatible with CFG too, set to 0 to disable",
+            default=DEFAULT_PAG,
+            ge=0,
+            le=50,
+        ),
+        clip_skip: int = Input(
+            description="How many CLIP layers to skip, 1 is actually no skip, this is the behavior in A1111 so it's aligned to it",
+            default=DEFAULT_CLIP_SKIP,
+            ge=1,
+        ),
         width: int = Input(description="The width of the image", default=DEFAULT_WIDTH, ge=1, le=4096),
         height: int = Input(description="The height of the image", default=DEFAULT_HEIGHT, ge=1, le=4096),
-        prepend_preprompt: bool = Input(description=f"Prepend preprompt (Prompt: \"{DEFAULT_POS_PREPROMPT}\" Negative prompt: \"{DEFAULT_NEG_PREPROMPT}\")", default=True),
+        prepend_preprompt: bool = Input(
+            description=f"Prepend preprompt (Prompt: \"{DEFAULT_POS_PREPROMPT}\" Negative prompt: \"{DEFAULT_NEG_PREPROMPT}\")", default=True
+        ),
         scheduler: str = Input(description="The scheduler to use", default=DEFAULT_SCHEDULER, choices=SCHEDULER_NAMES),
         steps: int = Input(description="The steps when generating", default=DEFAULT_STEPS, ge=1, le=100),
-        strength: float = Input(description="How much noise to add (For image to image and inpainting only, larger value indicates more noise added to the input image)", default=0.7, ge=0, le=1),
+        strength: float = Input(
+            description="How much noise to add (For image to image and inpainting only, larger value indicates more noise added to the input image)",
+            default=0.7,
+            ge=0,
+            le=1,
+        ),
         blur_factor: float = Input(description="The factor to blur the inpainting mask for smoother transition between masked and unmasked", default=5, ge=0),
-        batch_size: int = Input(description="Number of images to generate (1-4), note if you set this to 4, some high resolution gens might fail because of not enough VRAM", default=1, ge=1, le=4),
+        batch_size: int = Input(
+            description="Number of images to generate (1-4); note if you set this to 4, some high resolution gens might fail because of not enough VRAM",
+            default=1,
+            ge=1,
+            le=4,
+        ),
         seed: int = Input(description="The seed used when generating, set to -1 for random seed", default=-1),
-        lora_scale: float = Input(description="Lora scale for all loras in weighting prompts the <lora:url:1.0> 1.0 will be ignored only lora_scale will be applied", default=1.0),
-        prompt_emebding: bool = Input(description="if to enable 77+ token support by converting to embeds otherwise will use previous prompt/neg prompts.", default=False),
-
-        
+        lora_scale: float = Input(
+            description="Lora scale for all loras in weighting prompts the <lora:url:1.0> 1.0 will be ignored; only lora_scale will be applied",
+            default=1.0,
+        ),
+        prompt_emebding: bool = Input(description="If to enable 77+ token support by converting to embeds; otherwise will use previous prompt/neg prompts.", default=False),
+        # --- Hiresfix options ---
+        hiresfix: bool = Input(
+            description="Enable hiresfix mode: Generates a lower resolution base image, then upscales and refines it via img2img.", default=False
+        ),
+        hiresfix_scale: float = Input(
+            description="Scaling factor for hiresfix upscaling (e.g. 2.0, 4.0)", default=2.0, ge=1.0
+        ),
+        hiresfix_model: str = Input(
+            description="URI or local path to the RealESRGAN model weights for hiresfix.", default="models/upscale/RealESRGAN_x4plus_anime_6B.pth"
+        ),
     ) -> list[Path]:
         if prompt == "__ignore__":
             return []
@@ -235,6 +210,67 @@ class Predictor(BasePredictor):
             print("Using seed:", seed)
             imgs = pipeline(**gen_kwargs).images
 
+            # Decide which workflow to use.
+            if not hiresfix:
+                # Normal generation branch.
+                imgs = imgs
+            else:
+                # Hiresfix mode: generate at lower resolution, then upscale and refine.
+                low_width = int(width / hiresfix_scale)
+                low_height = int(height / hiresfix_scale)
+                print(f"Using hiresfix mode: generating low resolution base image ({low_width} x {low_height})")
+                gen_kwargs_low = gen_kwargs.copy()
+                gen_kwargs_low["width"] = low_width
+                gen_kwargs_low["height"] = low_height
+                if seed == -1:
+                    seed = random.randint(0, 2147483647)
+                gen_kwargs_low["generator"] = torch.Generator(device="cuda").manual_seed(seed)
+                low_res_imgs = pipeline(**gen_kwargs_low).images
+
+                # Upscaling step using RealESRGAN.
+                if "://" in hiresfix_model:
+                    local_upscale_folder = "models/upscale"
+                    os.makedirs(local_upscale_folder, exist_ok=True)
+                    parsed_url = urlparse(hiresfix_model)
+                    filename = os.path.basename(parsed_url.path)
+                    local_model_path = os.path.join(local_upscale_folder, filename)
+                    if not os.path.exists(local_model_path):
+                        print(f"Downloading custom hiresfix model from {hiresfix_model} to {local_model_path} ...")
+                        r = requests.get(hiresfix_model)
+                        r.raise_for_status()
+                        with open(local_model_path, "wb") as f:
+                            f.write(r.content)
+                    hiresfix_model_to_use = local_model_path
+                else:
+                    hiresfix_model_to_use = hiresfix_model
+
+                print("Upscaling low resolution images using RealESRGAN...")
+                upscaler = RealESRGAN(device="cuda", scale=int(hiresfix_scale))
+                upscaler.load_weights(hiresfix_model_to_use)
+                upscaled_imgs = []
+                for img in low_res_imgs:
+                    np_img = np.array(img)
+                    sr_img = upscaler.predict(np_img)
+                    upscaled_imgs.append(Image.fromarray(sr_img))
+
+                # Refinement pass via img2img using the same "strength" parameter.
+                print("Refining upscaled images with img2img pass...")
+                pipeline_refine = AutoPipelineForImage2Image.from_pipe(pipeline)
+                refined_imgs = []
+                for up_img in upscaled_imgs:
+                    refine_kwargs = {
+                        "prompt": prompt,
+                        "negative_prompt": negative_prompt,
+                        "image": up_img,
+                        "strength": strength,
+                        "width": width,
+                        "height": height,
+                        "generator": torch.Generator(device="cuda").manual_seed(seed)
+                    }
+                    refined = pipeline_refine(**refine_kwargs).images
+                    refined_imgs.extend(refined)
+                imgs = refined_imgs
+
             image_paths = []
             for index, img in enumerate(imgs):
                 img_file_path = f"tmp/{index}.png"
@@ -248,7 +284,7 @@ class SDXLMultiPipelineHandler:
 
     def __init__(self, model_name_obj_dict, vaes_dir_path, vae_names, textual_inversion_paths, torch_dtype, cpu_offload_inactive_models):
         self.model_name_obj_dict = model_name_obj_dict
-        self.model_pipeline_dict = {} # Key = Model's name(str), Value = StableDiffusionXLPAGPipeline instance.
+        self.model_pipeline_dict = {} # Key = Model's name(str), Value = StableDiffusionXLPipeline instance.
         self.vaes_dir_path = vaes_dir_path
         self.vae_obj_dict = {vae_name: None for vae_name in vae_names} # Key = VAE's name(str), Value = AutoencoderKL instance.
         self.textual_inversion_paths = textual_inversion_paths
