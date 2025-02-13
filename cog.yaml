@@ -21,6 +21,8 @@ build:
     - numpy
     - Pillow
     - realesrgan
+    - safetensors
+    - requests
 
   # commands run after the environment is setup
   run:
