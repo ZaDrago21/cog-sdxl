@@ -46,6 +46,8 @@ from realesrgan import RealESRGAN
 import requests
 from urllib.parse import urlparse
 
+import cv2
+
 # Cog will only run this class in a single thread.
 class Predictor(BasePredictor):
 
@@ -199,14 +201,28 @@ class Predictor(BasePredictor):
                 else:
                     hiresfix_model_to_use = hiresfix_model
 
-                print("Upscaling low resolution images using RealESRGAN...")
-                upscaler = RealESRGAN(device="cuda", scale=int(hiresfix_scale))
-                upscaler.load_weights(hiresfix_model_to_use)
+                print("Upscaling low resolution images using Real-ESRGAN via torch.hub...")
+
+                device = torch.device("cuda")
+                # hiresfix_model_to_use should be your local path to the Real‑ESRGAN model weights.
+                upscaler = torch.hub.load(
+                    "xinntao/Real-ESRGAN", 
+                    "real_esrgan", 
+                    model_path=hiresfix_model_to_use, 
+                    scale=int(hiresfix_scale)
+                )
+                upscaler.to(device)
+                upscaler.eval()
+
                 upscaled_imgs = []
                 for img in low_res_imgs:
-                    np_img = np.array(img)
-                    sr_img = upscaler.predict(np_img)
-                    upscaled_imgs.append(Image.fromarray(sr_img))
+                    # Convert from PIL (RGB) to numpy (BGR) as expected by the model.
+                    img_np = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
+                    with torch.no_grad():
+                        sr_img, _ = upscaler.predict(img_np)
+                    # Convert the result from BGR back to RGB.
+                    sr_img_rgb = cv2.cvtColor(sr_img, cv2.COLOR_BGR2RGB)
+                    upscaled_imgs.append(Image.fromarray(sr_img_rgb))
 
                 # Refinement pass via img2img using the same "strength" parameter.
                 print("Refining upscaled images with img2img pass...")
@@ -217,13 +233,10 @@ class Predictor(BasePredictor):
                         "prompt": prompt,
                         "negative_prompt": negative_prompt,
                         "image": up_img,
-                        "strength": strength,
-                        "width": width,
-                        "height": height,
-                        "generator": torch.Generator(device="cuda").manual_seed(seed)
+                        "strength": strength
                     }
-                    refined = pipeline_refine(**refine_kwargs).images
-                    refined_imgs.extend(refined)
+                    refined_img = pipeline_refine(**refine_kwargs)["sample"][0]
+                    refined_imgs.append(refined_img)
                 imgs = refined_imgs
 
             image_paths = []
