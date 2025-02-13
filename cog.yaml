@@ -16,7 +16,7 @@ build:
   python_packages:
     - torch==2.6.0
     - torchvision==0.21.0
-    - torchaudio==2.5.1
+    - torchaudio==2.6.0
     - compel==2.0.3
     - numpy
     - Pillow
