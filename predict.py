@@ -58,13 +58,11 @@ from weighting import parse_weights
 
 # Import RealESRGAN from the top
 from realesrgan import RealESRGANer
+from basicsr.archs.rrdbnet_arch import RRDBNet
+from gfpgan import GFPGANer  # <-- Added for face restoration
 
 import requests
 from urllib.parse import urlparse
-
-import cv2
-
-
 
 # Cog will only run this class in a single thread.
 class Predictor(BasePredictor):
@@ -109,10 +107,24 @@ class Predictor(BasePredictor):
         lora_scale: float = Input(description="Lora scale for all loras in weighting prompts the <lora:url:1.0> 1.0 will be ignored only lora_scale will be applied", default=1.0),
         prompt_emebding: bool = Input(description="if to enable 77+ token support by converting to embeds otherwise will use previous prompt/neg prompts.", default=False),
         hiresfix: bool = Input(description="If to use hiresfix", default=False),
-        hiresfix_model: str = Input(description="URI or local path to the RealESRGAN model weights for hiresfix.", default="models/upscale/RealESRGAN_x4plus_anime_6B.pth"),
+        hiresfix_model: str = Input(
+            description="URI or local path to the RealESRGAN model weights for hiresfix. Choose from available upscale models.",
+            default=DEFAULT_UPSCALE_MODEL,
+            choices=UPSCALE_MODELS,
+        ),
         hiresfix_scale: float = Input(description="The scale factor for the hiresfix model", default=4),
-
-        
+        face_restoration: bool = Input(description="Apply GFPGAN-based face restoration for enhanced facial details", default=False),
+        gfpgan_model: str = Input(description="Path or URL to the GFPGAN model weights", default="gfpgan/weights/GFPGANv1.4.pth"),
+        compress_level: int = Input(
+            description="PNG compression level (0 = no compression, 9 = maximum compression)",
+            default=6,
+            ge=0,
+            le=9,
+        ),
+        optimize: bool = Input(
+            description="Enable PNG optimization during saving. Disable this to skip optimization.",
+            default=True,
+        ),
     ) -> list[Path]:
         if prompt == "__ignore__":
             return []
@@ -183,63 +195,127 @@ class Predictor(BasePredictor):
                 seed = random.randint(0, 2147483647)
             gen_kwargs["generator"] = torch.Generator(device="cuda").manual_seed(seed)
             print("Using seed:", seed)
-            imgs = pipeline(**gen_kwargs).images
-
-            # Decide which workflow to use.
             if not hiresfix:
-                # Normal generation branch.
-                imgs = imgs
+                imgs = pipeline(**gen_kwargs).images
             else:
-                # Hiresfix mode: generate at lower resolution, then upscale and refine.
-                low_width = int(width / hiresfix_scale)
-                low_height = int(height / hiresfix_scale)
-                print(f"Using hiresfix mode: generating low resolution base image ({low_width} x {low_height})")
-                gen_kwargs_low = gen_kwargs.copy()
-                gen_kwargs_low["width"] = low_width
-                gen_kwargs_low["height"] = low_height
-                if seed == -1:
-                    seed = random.randint(0, 2147483647)
-                gen_kwargs_low["generator"] = torch.Generator(device="cuda").manual_seed(seed)
-                low_res_imgs = pipeline(**gen_kwargs_low).images
+                # Step 1: Use the passed image if provided, otherwise generate a full-resolution image.
+                if image is not None:
+                    full_res_img = Image.open(str(image))
+                    full_res_img = full_res_img.convert("RGB")
+                    full_res_imgs = [full_res_img]
+                    print("Using the provided image for hiresfix processing.")
+                else:
+                    full_res_imgs = pipeline(**gen_kwargs).images
 
-                # Upscaling using the realesrgan package directly
-                print("Upscaling low resolution images using realesrgan...")
-                device = torch.device("cuda")
-                upscaler = RealESRGANer(device=device, scale=int(hiresfix_scale))
-                upscaler.load_weights(hiresfix_model)  # hiresfix_model is your path to the pretrained weight file
-                upscaler.to(device)
-                upscaler.eval()
+                # Prepare the RealESRGAN (hiresfix) upsampler.
+                if not os.path.exists(hiresfix_model):
+                    raise FileNotFoundError(f"Upscaler weight file not found: {hiresfix_model}")
+                backbone_model, netscale = get_upscale_backbone("RealESRGAN_x4plus_anime_6B")
+                upsampler = RealESRGANer(
+                    scale=netscale,
+                    model_path=hiresfix_model,
+                    dni_weight=None,
+                    model=backbone_model,
+                    tile=0,
+                    tile_pad=10,
+                    pre_pad=0,
+                    half=False,  # Set to True for FP16 precision if desired.
+                    gpu_id=0
+                )
+                
+                # Initialize GFPGAN if face restoration is enabled.
+                if face_restoration:
+                    if not os.path.exists(gfpgan_model):
+                        raise FileNotFoundError(f"GFPGAN model file not found: {gfpgan_model}")
+                    gfpganer = GFPGANer(
+                        model_path=gfpgan_model,
+                        upscale=1,  # No additional scaling is applied.
+                        arch="clean", 
+                        channel_multiplier=2,
+                        bg_upsampler=None  # Optionally, you can set bg_upsampler=upsampler if desired.
+                    )
+                    print("GFPGAN face restoration is enabled.")
 
-                upscaled_imgs = []
-                for img in low_res_imgs:
-                    # Convert from PIL (RGB) to numpy (BGR) as expected by the model.
-                    img_np = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
-                    with torch.no_grad():
-                        sr_img, _ = upscaler.predict(img_np)
-                    # Convert the result from BGR back to RGB.
-                    sr_img_rgb = cv2.cvtColor(sr_img, cv2.COLOR_BGR2RGB)
-                    upscaled_imgs.append(Image.fromarray(sr_img_rgb))
+                fixed_imgs = []
+                for full_img in full_res_imgs:
+                    # Step 2: Downscale the full-resolution image to a lower resolution.
+                    low_img = full_img.resize(
+                        (round(full_img.width / hiresfix_scale), round(full_img.height / hiresfix_scale)),
+                        resample=Image.LANCZOS
+                    )
 
-                # Refinement pass via img2img using the same "strength" parameter.
-                print("Refining upscaled images with img2img pass...")
-                pipeline_refine = AutoPipelineForImage2Image.from_pipe(pipeline)
-                refined_imgs = []
-                for up_img in upscaled_imgs:
+                    # Step 3: Upscale the downscaled image back using RealESRGAN.
+                    low_img_np = np.array(low_img)[..., ::-1]  # Convert to BGR
+                    sr_img_np, _ = upsampler.enhance(low_img_np, outscale=int(hiresfix_scale))
+                    sr_img = Image.fromarray(sr_img_np[..., ::-1])  # Back to RGB
+
                     refine_kwargs = {
                         "prompt": prompt,
                         "negative_prompt": negative_prompt,
-                        "image": up_img,
-                        "strength": strength
+                        "image": sr_img,  # for img2img, use "image"
+                        "strength": strength,
+                        "num_inference_steps": steps,
+                        "guidance_scale": cfg_scale,
+                        "guidance_rescale": guidance_rescale,
+                        "pag_scale": pag_scale,
+                        "clip_skip": clip_skip - 1,
+                        "generator": torch.Generator(device="cuda").manual_seed(seed),
                     }
-                    refined_img = pipeline_refine(**refine_kwargs)["sample"][0]
-                    refined_imgs.append(refined_img)
-                imgs = refined_imgs
+
+                    refine_pipeline = AutoPipelineForImage2Image.from_pipe(pipeline)
+                    refined_img = refine_pipeline(**refine_kwargs)["images"][0]
+
+                    # Optionally apply GFPGAN face restoration.
+                    if face_restoration:
+                        # GFPGANer.enhance returns a tuple (cropped_faces, restored_faces, output)
+                        _, _, refined_img_np = gfpganer.enhance(
+                            np.array(refined_img),
+                            has_aligned=False,
+                            only_center_face=False,
+                            paste_back=True
+                        )
+                        refined_img = Image.fromarray(refined_img_np)
+                        print("GFPGAN face restoration applied.")
+
+                    fixed_imgs.append(refined_img)
+                imgs = fixed_imgs
 
             image_paths = []
+            # Import the metadata writing utility.
             for index, img in enumerate(imgs):
                 img_file_path = f"tmp/{index}.png"
-                img.save(img_file_path, optimize=True, compress_level=9)
+                # Save the image using the specified compression level and optimization flag.
+                img.save(img_file_path, optimize=optimize, compress_level=compress_level)
                 image_paths.append(Path(img_file_path))
+                
+                # Capture generation metadata details.
+                metadata = {
+                    "prompt": prompt,
+                    "negative_prompt": negative_prompt,
+                    "model": model,
+                    "vae": vae if vae else BAKEDIN_VAE_LABEL,  # Adjust as required.
+                    "steps": steps,
+                    "cfg_scale": cfg_scale,
+                    "guidance_rescale": guidance_rescale,
+                    "pag_scale": pag_scale,
+                    "clip_skip": clip_skip,
+                    "seed": seed,
+                    "scheduler": scheduler,
+                    "hiresfix": hiresfix,
+                    "lora": loras,
+                    "face_restoration": face_restoration,
+                    "gfpgan_model": gfpgan_model,
+                    "hiresfix_scale": hiresfix_scale,
+                    "strength": strength,
+                    "width": width,
+                    "height": height,
+                    "hiresfix_model": hiresfix_model,
+                    "blur_factor": blur_factor,
+                    "prepend_preprompt": prepend_preprompt,
+                    "prompt_emebding": prompt_emebding,
+                    # Add additional parameters you'd like to track.
+                }
+                utils.write_generation_metadata(Path(img_file_path), metadata)
             return image_paths
         finally:
             pipeline.unload_lora_weights()
@@ -317,3 +393,21 @@ class SDXLMultiPipelineHandler:
         vae.to("cuda")
         self.vae_obj_dict[model_name] = vae
         return pipeline
+
+# For RealESRGAN_x4plus_anime_6B, create the backbone architecture
+def get_upscale_backbone(model_name: str):
+    # Create the backbone architecture based on the model name.
+    if model_name == "RealESRGAN_x4plus_anime_6B":
+        # For the anime model, use a smaller RRDBNet (fewer blocks)
+        backbone = RRDBNet(
+            num_in_ch=3,
+            num_out_ch=3,
+            num_feat=64,
+            num_block=6,       # Fewer blocks for the anime version
+            num_grow_ch=32,
+            scale=4
+        )
+        netscale = 4
+    else:
+        raise NotImplementedError("Model name not supported")
+    return backbone, netscale

@@ -6,6 +6,19 @@ import subprocess
 import safetensors
 from PIL import Image
 from constants import * # constants.py
+import json
+from datetime import datetime
+from pathlib import Path
+
+def write_generation_metadata(image_path: Path, metadata: dict):
+    """
+    Writes metadata for the generated image to a JSON file.
+    The metadata is saved in the same directory as the image, with the same filename but a .json extension.
+    """
+    meta_file = Path(str(image_path).replace('.png', '.json'))
+    metadata["generated_at"] = datetime.utcnow().isoformat() + "Z"
+    with meta_file.open("w") as f:
+        json.dump(metadata, f, indent=4) 
 
 def convert_to_rgb(image):
     # `image.convert("RGB")` would only work for .jpg images, as it creates a wrong

@@ -1,3 +1,4 @@
+import os
 import requests
 import torch
 from schedulers import SDXLCompatibleSchedulers # schedulers.py
@@ -52,3 +53,13 @@ DEFAULT_HEIGHT = 864
 
 DEFAULT_SCHEDULER = SCHEDULER_NAMES[0]
 DEFAULT_STEPS = 35
+
+# Upscaler constants
+UPSCALE_DIR_PATH = "upscalers"
+UPSCALE_MODELS = []
+if os.path.exists(UPSCALE_DIR_PATH):
+    for fname in os.listdir(UPSCALE_DIR_PATH):
+        if fname.lower().endswith(".pth"):
+            UPSCALE_MODELS.append(os.path.join(UPSCALE_DIR_PATH, fname))
+UPSCALE_MODELS.sort()  # Sort alphabetically, if needed.
+DEFAULT_UPSCALE_MODEL = UPSCALE_MODELS[0] if UPSCALE_MODELS else None
