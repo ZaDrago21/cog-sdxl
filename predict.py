@@ -14,12 +14,10 @@ sys.modules["torchvision.transforms.functional_tensor"] = functional_tensor
 from constants import * # constants.py
 DEFAULT_VAE_NAME = BAKEDIN_VAE_LABEL if DEFAULT_VAE_NAME is None else DEFAULT_VAE_NAME
 
-try:
-    assert len(MODELS) > 0, f"You don't have any model under \"{MODELS_DIR_PATH}\", please put at least 1 model in there!"
-    assert DEFAULT_VAE_NAME == BAKEDIN_VAE_LABEL or DEFAULT_VAE_NAME in VAE_NAMES, f"You have set a default VAE but it's not found under \"{VAES_DIR_PATH}\"!"
-    assert DEFAULT_CLIP_SKIP >= 1, f"CLIP skip must be at least 1 (which is no skip), this is the behavior in A1111 so it's aligned to it!"
-except Exception as e:
-    print("Assert error:", e)
+assert len(MODELS) > 0, f"You don't have any model under \"{MODELS_DIR_PATH}\", please put at least 1 model in there!"
+assert DEFAULT_VAE_NAME == BAKEDIN_VAE_LABEL or DEFAULT_VAE_NAME in VAE_NAMES, f"You have set a default VAE but it's not found under \"{VAES_DIR_PATH}\"!"
+assert DEFAULT_CLIP_SKIP >= 1, f"CLIP skip must be at least 1 (which is no skip), this is the behavior in A1111 so it's aligned to it!"
+
 
 
 
@@ -78,14 +76,12 @@ class Predictor(BasePredictor):
 
     def predict(
         self,
-        # --- Debug: Use static choices for schema validation ---
-        model: str = Input(description="The model to use", default=DEFAULT_MODEL, choices=[DEFAULT_MODEL] if DEFAULT_MODEL else ["placeholder-model"]), 
+        model: str = Input(description="The model to use", default=DEFAULT_MODEL, choices=MODEL_NAMES),
         vae: str = Input(
             description="The VAE to use",
             default=DEFAULT_VAE_NAME,
-            choices=[DEFAULT_VAE_NAME] if DEFAULT_VAE_NAME else ["placeholder-vae"] # Static list for debug
+            choices=list(dict.fromkeys([DEFAULT_VAE_NAME, BAKEDIN_VAE_LABEL] + VAE_NAMES + MODEL_NAMES)),
         ),
-        # --- End Debug ---
         prompt: str = Input(description="The prompt", default=DEFAULT_POSITIVE_PROMPT),
         image: Path = Input(description="The image for image to image or as the base for inpainting (Will be scaled then cropped to the set width and height)", default=None),
         mask: Path = Input(description="The mask for inpainting, white areas will be modified and black preserved (Will be scaled then cropped to the set width and height)", default=None),
@@ -112,13 +108,11 @@ class Predictor(BasePredictor):
         lora_scale: float = Input(description="Lora scale for all loras in weighting prompts the <lora:url:1.0> 1.0 will be ignored only lora_scale will be applied", default=1.0),
         prompt_emebding: bool = Input(description="if to enable 77+ token support by converting to embeds otherwise will use previous prompt/neg prompts.", default=False),
         hiresfix: bool = Input(description="If to use hiresfix", default=False),
-        # --- Debug: Use static choices for schema validation ---
         hiresfix_model: str = Input(
             description="URI or local path to the RealESRGAN model weights for hiresfix. Choose from available upscale models.",
             default=DEFAULT_UPSCALE_MODEL,
-            choices=[DEFAULT_UPSCALE_MODEL] if DEFAULT_UPSCALE_MODEL else ["placeholder-upscaler"] # Static list for debug
+            choices=UPSCALE_MODELS,
         ),
-        # --- End Debug ---
         hiresfix_scale: float = Input(description="The scale factor for the hiresfix model", default=4),
         face_restoration: bool = Input(description="Apply GFPGAN-based face restoration for enhanced facial details", default=False),
         gfpgan_model: str = Input(description="Path or URL to the GFPGAN model weights", default="gfpgan/GFPGANv1.4.pth"),
@@ -492,9 +486,10 @@ class SDXLMultiPipelineHandler:
             pipeline.unet = torch.compile(pipeline.unet, mode="reduce-overhead", fullgraph=True)
             # VAE encode/decode are often separate methods
             pipeline.vae.decode = torch.compile(pipeline.vae.decode, mode="reduce-overhead", fullgraph=True) 
-            pipeline.text_encoder = torch.compile(pipeline.text_encoder, mode="reduce-overhead", fullgraph=True)
-            pipeline.text_encoder_2 = torch.compile(pipeline.text_encoder_2, mode="reduce-overhead", fullgraph=True)
-            print(f"Successfully compiled components for model {model_name}.")
+            # --- Disable compilation for text encoders due to Compel/CUDAGraph conflict ---
+            # pipeline.text_encoder = torch.compile(pipeline.text_encoder, mode="reduce-overhead", fullgraph=True)
+            # pipeline.text_encoder_2 = torch.compile(pipeline.text_encoder_2, mode="reduce-overhead", fullgraph=True)
+            print(f"Successfully compiled UNet and VAE Decoder for model {model_name}. Text encoders remain in eager mode.") # Updated message
         except Exception as e:
             print(f"Warning: torch.compile failed for model {model_name}. Error: {e}. Model will run in eager mode.")
         # --- End Compilation ---
