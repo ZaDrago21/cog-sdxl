@@ -14,10 +14,12 @@ sys.modules["torchvision.transforms.functional_tensor"] = functional_tensor
 from constants import * # constants.py
 DEFAULT_VAE_NAME = BAKEDIN_VAE_LABEL if DEFAULT_VAE_NAME is None else DEFAULT_VAE_NAME
 
-assert len(MODELS) > 0, f"You don't have any model under \"{MODELS_DIR_PATH}\", please put at least 1 model in there!"
-assert DEFAULT_VAE_NAME == BAKEDIN_VAE_LABEL or DEFAULT_VAE_NAME in VAE_NAMES, f"You have set a default VAE but it's not found under \"{VAES_DIR_PATH}\"!"
-assert DEFAULT_CLIP_SKIP >= 1, f"CLIP skip must be at least 1 (which is no skip), this is the behavior in A1111 so it's aligned to it!"
-
+try:
+    assert len(MODELS) > 0, f"You don't have any model under \"{MODELS_DIR_PATH}\", please put at least 1 model in there!"
+    assert DEFAULT_VAE_NAME == BAKEDIN_VAE_LABEL or DEFAULT_VAE_NAME in VAE_NAMES, f"You have set a default VAE but it's not found under \"{VAES_DIR_PATH}\"!"
+    assert DEFAULT_CLIP_SKIP >= 1, f"CLIP skip must be at least 1 (which is no skip), this is the behavior in A1111 so it's aligned to it!"
+except Exception as e:
+    print("Assert error:", e)
 
 
 
@@ -119,7 +121,7 @@ class Predictor(BasePredictor):
         # --- End Debug ---
         hiresfix_scale: float = Input(description="The scale factor for the hiresfix model", default=4),
         face_restoration: bool = Input(description="Apply GFPGAN-based face restoration for enhanced facial details", default=False),
-        gfpgan_model: str = Input(description="Path or URL to the GFPGAN model weights", default="gfpgan/weights/GFPGANv1.4.pth"),
+        gfpgan_model: str = Input(description="Path or URL to the GFPGAN model weights", default="gfpgan/GFPGANv1.4.pth"),
         compress_level: int = Input(
             description="PNG compression level (0 = no compression, 9 = maximum compression)",
             default=6,
