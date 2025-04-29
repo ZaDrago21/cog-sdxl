@@ -14,10 +14,12 @@ sys.modules["torchvision.transforms.functional_tensor"] = functional_tensor
 from constants import * # constants.py
 DEFAULT_VAE_NAME = BAKEDIN_VAE_LABEL if DEFAULT_VAE_NAME is None else DEFAULT_VAE_NAME
 
-assert len(MODELS) > 0, f"You don't have any model under \"{MODELS_DIR_PATH}\", please put at least 1 model in there!"
-assert DEFAULT_VAE_NAME == BAKEDIN_VAE_LABEL or DEFAULT_VAE_NAME in VAE_NAMES, f"You have set a default VAE but it's not found under \"{VAES_DIR_PATH}\"!"
-assert DEFAULT_CLIP_SKIP >= 1, f"CLIP skip must be at least 1 (which is no skip), this is the behavior in A1111 so it's aligned to it!"
-
+try:
+     assert len(MODELS) > 0, f"You don't have any model under \"{MODELS_DIR_PATH}\", please put at least 1 model in there!"
+     assert DEFAULT_VAE_NAME == BAKEDIN_VAE_LABEL or DEFAULT_VAE_NAME in VAE_NAMES, f"You have set a default VAE but it's not found under \"{VAES_DIR_PATH}\"!"
+     assert DEFAULT_CLIP_SKIP >= 1, f"CLIP skip must be at least 1 (which is no skip), this is the behavior in A1111 so it's aligned to it!"
+ except Exception as e:
+     print("Assert error:", e)
 
 
 
@@ -76,12 +78,11 @@ class Predictor(BasePredictor):
 
     def predict(
         self,
-        model: str = Input(description="The model to use", default=DEFAULT_MODEL, choices=MODEL_NAMES),
-        vae: str = Input(
+        model: str = Input(description="The model to use", default=DEFAULT_MODEL, choices=[DEFAULT_MODEL] if DEFAULT_MODEL else ["placeholder-model"]),         vae: str = Input(
             description="The VAE to use",
             default=DEFAULT_VAE_NAME,
-            choices=list(dict.fromkeys([DEFAULT_VAE_NAME, BAKEDIN_VAE_LABEL] + VAE_NAMES + MODEL_NAMES)),
-        ),
+            choices=[DEFAULT_VAE_NAME] if DEFAULT_VAE_NAME else ["placeholder-vae"]
+            ),
         prompt: str = Input(description="The prompt", default=DEFAULT_POSITIVE_PROMPT),
         image: Path = Input(description="The image for image to image or as the base for inpainting (Will be scaled then cropped to the set width and height)", default=None),
         mask: Path = Input(description="The mask for inpainting, white areas will be modified and black preserved (Will be scaled then cropped to the set width and height)", default=None),
