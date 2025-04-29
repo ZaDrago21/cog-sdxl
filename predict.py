@@ -486,17 +486,6 @@ class SDXLMultiPipelineHandler:
         pipeline = AutoPipelineForText2Image.from_pipe(model_for_loading.load(torch_dtype=self.torch_dtype, add_watermarker=False), enable_pag=True)
         utils.apply_textual_inversions_to_sdxl_pipeline(pipeline, clip_l_list, clip_g_list, activation_token_list)
         
-        # --- Compile key components ---
-        try:
-            print(f"Attempting torch.compile on components for model {model_name}...")
-            pipeline.unet = torch.compile(pipeline.unet, mode="reduce-overhead", fullgraph=True)
-            # VAE encode/decode are often separate methods
-            pipeline.vae.decode = torch.compile(pipeline.vae.decode, mode="reduce-overhead", fullgraph=True) 
-            print(f"Successfully compiled UNet and VAE Decoder for model {model_name}. Text encoders remain in eager mode.") # Updated message
-        except Exception as e:
-            print(f"Warning: torch.compile failed for model {model_name}. Error: {e}. Model will run in eager mode.")
-        # --- End Compilation ---
-
         vae = pipeline.vae
         pipeline.vae = None
         vae.enable_slicing()
@@ -524,12 +513,6 @@ class SDXLMultiPipelineHandler:
                 use_safetensors=True,
                 variant="fp16" if self.torch_dtype == torch.float16 else None # Use fp16 variant if appropriate
             )
-            # Apply torch.compile to refiner components
-            print("Attempting torch.compile on refiner components...")
-            refiner.unet = torch.compile(refiner.unet, mode="reduce-overhead", fullgraph=True)
-            # Refiner often uses the same VAE, compilation might already be done or can be skipped if sharing
-            # refiner.vae.decode = torch.compile(refiner.vae.decode, mode="reduce-overhead", fullgraph=True)
-            print("Successfully compiled refiner components.")
 
             if not self.cpu_offload_inactive_models:
                 refiner.to("cuda")
