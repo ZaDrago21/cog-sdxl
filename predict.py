@@ -76,12 +76,14 @@ class Predictor(BasePredictor):
 
     def predict(
         self,
-        model: str = Input(description="The model to use", default=DEFAULT_MODEL, choices=MODEL_NAMES),
+        # --- Debug: Use static choices for schema validation ---
+        model: str = Input(description="The model to use", default=DEFAULT_MODEL, choices=[DEFAULT_MODEL] if DEFAULT_MODEL else ["placeholder-model"]), 
         vae: str = Input(
             description="The VAE to use",
             default=DEFAULT_VAE_NAME,
-            choices=list(dict.fromkeys([DEFAULT_VAE_NAME, BAKEDIN_VAE_LABEL] + VAE_NAMES + MODEL_NAMES)),
+            choices=[DEFAULT_VAE_NAME] if DEFAULT_VAE_NAME else ["placeholder-vae"] # Static list for debug
         ),
+        # --- End Debug ---
         prompt: str = Input(description="The prompt", default=DEFAULT_POSITIVE_PROMPT),
         image: Path = Input(description="The image for image to image or as the base for inpainting (Will be scaled then cropped to the set width and height)", default=None),
         mask: Path = Input(description="The mask for inpainting, white areas will be modified and black preserved (Will be scaled then cropped to the set width and height)", default=None),
@@ -108,11 +110,13 @@ class Predictor(BasePredictor):
         lora_scale: float = Input(description="Lora scale for all loras in weighting prompts the <lora:url:1.0> 1.0 will be ignored only lora_scale will be applied", default=1.0),
         prompt_emebding: bool = Input(description="if to enable 77+ token support by converting to embeds otherwise will use previous prompt/neg prompts.", default=False),
         hiresfix: bool = Input(description="If to use hiresfix", default=False),
+        # --- Debug: Use static choices for schema validation ---
         hiresfix_model: str = Input(
             description="URI or local path to the RealESRGAN model weights for hiresfix. Choose from available upscale models.",
             default=DEFAULT_UPSCALE_MODEL,
-            choices=UPSCALE_MODELS,
+            choices=[DEFAULT_UPSCALE_MODEL] if DEFAULT_UPSCALE_MODEL else ["placeholder-upscaler"] # Static list for debug
         ),
+        # --- End Debug ---
         hiresfix_scale: float = Input(description="The scale factor for the hiresfix model", default=4),
         face_restoration: bool = Input(description="Apply GFPGAN-based face restoration for enhanced facial details", default=False),
         gfpgan_model: str = Input(description="Path or URL to the GFPGAN model weights", default="gfpgan/weights/GFPGANv1.4.pth"),
