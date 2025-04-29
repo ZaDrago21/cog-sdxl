@@ -2,7 +2,7 @@
 # Reference: https://github.com/replicate/cog/blob/main/docs/yaml.md
 
 build:
-  cuda: "12.6"
+  cuda: "12.6.2"
   # set to true if your model requires a GPU
   gpu: true
 
@@ -27,6 +27,7 @@ build:
     - gfpgan
     - safetensors
     - requests
+    - xformers
   # commands run after the environment is setup
   run:
     - "pip3 install -U scipy && pip3 cache purge"
