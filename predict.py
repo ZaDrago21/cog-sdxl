@@ -392,6 +392,7 @@ class Predictor(BasePredictor):
 class SDXLMultiPipelineHandler:
 
     def __init__(self, model_name_obj_dict, vaes_dir_path, vae_names, textual_inversion_paths, torch_dtype, cpu_offload_inactive_models):
+        print("--- SDXLMultiPipelineHandler: Initializing ---") # Debug
         self.model_name_obj_dict = model_name_obj_dict
         self.model_pipeline_dict = {} # Key = Model's name(str), Value = StableDiffusionXLPipeline instance.
         self.vaes_dir_path = vaes_dir_path
@@ -401,11 +402,20 @@ class SDXLMultiPipelineHandler:
         self.cpu_offload_inactive_models = cpu_offload_inactive_models
         self.refiner_pipeline = None # Placeholder for refiner
 
+        print("--- SDXLMultiPipelineHandler: Starting VAE loading ---") # Debug
         self._load_all_vaes() # Must load VAEs before models.
+        print("--- SDXLMultiPipelineHandler: Finished VAE loading ---") # Debug
+        
+        print("--- SDXLMultiPipelineHandler: Starting Model loading ---") # Debug
         self._load_all_models()
+        print("--- SDXLMultiPipelineHandler: Finished Model loading ---") # Debug
+        
+        print("--- SDXLMultiPipelineHandler: Starting Refiner loading ---") # Debug
         self._load_refiner() # Load the refiner model
+        print("--- SDXLMultiPipelineHandler: Finished Refiner loading ---") # Debug
 
         self.activated_model = None
+        print("--- SDXLMultiPipelineHandler: Initialization Complete ---") # Debug
 
     def get_pipeline(self, model_name, vae_name, scheduler_name):
         # __init__ function guarantees all models and VAEs to be loaded.
@@ -505,7 +515,7 @@ class SDXLMultiPipelineHandler:
             refiner = DiffusionPipeline.from_pretrained(
                 "stabilityai/stable-diffusion-xl-refiner-1.0",
                 text_encoder_2=self.model_pipeline_dict[DEFAULT_MODEL].text_encoder_2, # Reuse text encoder 2
-                vae=self.model_pipeline_dict[DEFAULT_MODEL].vae,                   # Reuse VAE
+                vae=self.vae_obj_dict[DEFAULT_MODEL], # Get VAE object stored during base model loading
                 torch_dtype=self.torch_dtype,
                 use_safetensors=True,
                 variant="fp16" if self.torch_dtype == torch.float16 else None # Use fp16 variant if appropriate
