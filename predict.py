@@ -492,8 +492,16 @@ class SDXLMultiPipelineHandler:
 
     def _load_refiner(self):
         """Loads the SDXL Refiner model."""
+        # --- Add check for default model pipeline existence ---
+        if DEFAULT_MODEL not in self.model_pipeline_dict or not self.model_pipeline_dict[DEFAULT_MODEL]:
+            print(f"Warning: Default model ({DEFAULT_MODEL}) pipeline not found or failed to load. Cannot load Refiner.")
+            self.refiner_pipeline = None
+            return
+        # --- End check ---
+        
         try:
             print("Loading SDXL Refiner model...")
+            # Reuse components from the *loaded* default model pipeline
             refiner = DiffusionPipeline.from_pretrained(
                 "stabilityai/stable-diffusion-xl-refiner-1.0",
                 text_encoder_2=self.model_pipeline_dict[DEFAULT_MODEL].text_encoder_2, # Reuse text encoder 2
