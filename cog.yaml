@@ -32,6 +32,7 @@ build:
   # commands run after the environment is setup
   run:
     - "pip3 install -U scipy && pip3 cache purge"
+    - "pip3 install -v -U git+https://github.com/chengzeyi/stable-fast.git@main#egg=stable-fast"
     - "pip3 install -U huggingface_hub[hf_transfer] omegaconf accelerate transformers diffusers peft torchsde && pip3 cache purge"
     - "python3 -c 'from huggingface_hub import hf_hub_download as d;d(repo_id=\"stabilityai/stable-diffusion-xl-base-1.0\", filename=\"scheduler_config.json\", subfolder=\"scheduler\")'"
     - "python3 -c 'import os; from huggingface_hub import hf_hub_download as d; path = d(repo_id=\"ac-pill/upscale_models\", filename=\"RealESRGAN_x4plus_anime_6B.pth\"); os.makedirs(\"upscalers\", exist_ok=True); os.system(f\"cp {path} upscalers/RealESRGAN_x4plus_anime_6B.pth\")'"
