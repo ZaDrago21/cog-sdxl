@@ -3,6 +3,9 @@ import sys
 import types
 from torchvision.transforms.functional import rgb_to_grayscale
 
+from sfast.compilers.diffusion_pipeline_compiler import compile as sfast_compile, CompilationConfig
+
+
 # Create a module for `torchvision.transforms.functional_tensor`
 functional_tensor = types.ModuleType("torchvision.transforms.functional_tensor")
 functional_tensor.rgb_to_grayscale = rgb_to_grayscale
@@ -14,12 +17,10 @@ sys.modules["torchvision.transforms.functional_tensor"] = functional_tensor
 from constants import * # constants.py
 DEFAULT_VAE_NAME = BAKEDIN_VAE_LABEL if DEFAULT_VAE_NAME is None else DEFAULT_VAE_NAME
 
-try:
-    assert len(MODELS) > 0, f"You don't have any model under \"{MODELS_DIR_PATH}\", please put at least 1 model in there!"
-    assert DEFAULT_VAE_NAME == BAKEDIN_VAE_LABEL or DEFAULT_VAE_NAME in VAE_NAMES, f"You have set a default VAE but it's not found under \"{VAES_DIR_PATH}\"!"
-    assert DEFAULT_CLIP_SKIP >= 1, f"CLIP skip must be at least 1 (which is no skip), this is the behavior in A1111 so it's aligned to it!"
-except Exception as e:
-    print("Assert error:", e)
+assert len(MODELS) > 0, f"You don't have any model under \"{MODELS_DIR_PATH}\", please put at least 1 model in there!"
+assert DEFAULT_VAE_NAME == BAKEDIN_VAE_LABEL or DEFAULT_VAE_NAME in VAE_NAMES, f"You have set a default VAE but it's not found under \"{VAES_DIR_PATH}\"!"
+assert DEFAULT_CLIP_SKIP >= 1, f"CLIP skip must be at least 1 (which is no skip), this is the behavior in A1111 so it's aligned to it!"
+
 
 
 
@@ -47,7 +48,6 @@ from diffusers.loaders import (
     StableDiffusionXLLoraLoaderMixin,
     TextualInversionLoaderMixin,
 )
-from diffusers import DiffusionPipeline
 
 from diffusers.models.lora import adjust_lora_scale_text_encoder
 from diffusers.utils import (
@@ -67,6 +67,31 @@ from gfpgan import GFPGANer  # <-- Added for face restoration
 import requests
 from urllib.parse import urlparse
 
+
+def _compile_pipeline_for_speed(pipe: "StableDiffusionXLPipeline") -> "StableDiffusionXLPipeline":
+    """Compile the whole pipeline (UNet, VAE, schedulers) via *sfast* for 1.3‑1.8× speed‑up."""
+
+    cfg = CompilationConfig.Default()
+
+    # enable optional back‑ends if present
+    try:
+        import xformers  # noqa: F401
+        cfg.enable_xformers = True
+    except ImportError:
+        pass
+
+    try:
+        import triton  # noqa: F401
+        cfg.enable_triton = True
+    except ImportError:
+        pass
+
+    cfg.enable_cuda_graph = True  # good latency when resolution is fixed
+
+    return sfast_compile(pipe, cfg)
+
+
+
 # Cog will only run this class in a single thread.
 class Predictor(BasePredictor):
 
@@ -76,19 +101,14 @@ class Predictor(BasePredictor):
         self.loras = SDXLMultiLoRAHandler()
         os.makedirs("tmp", exist_ok=True)
 
-        self.torch_dtype = torch.float16 if torch.cuda.is_available() else torch.float32
-        print(f"Setting torch_dtype to {self.torch_dtype}")
-
     def predict(
         self,
-        # --- Debug: Use static choices for schema validation ---
-        model: str = Input(description="The model to use", default=DEFAULT_MODEL, choices=[DEFAULT_MODEL] if DEFAULT_MODEL else ["placeholder-model"]), 
+        model: str = Input(description="The model to use", default=DEFAULT_MODEL, choices=MODEL_NAMES),
         vae: str = Input(
             description="The VAE to use",
             default=DEFAULT_VAE_NAME,
-            choices=[DEFAULT_VAE_NAME] if DEFAULT_VAE_NAME else ["placeholder-vae"] # Static list for debug
+            choices=list(dict.fromkeys([DEFAULT_VAE_NAME, BAKEDIN_VAE_LABEL] + VAE_NAMES + MODEL_NAMES)),
         ),
-        # --- End Debug ---
         prompt: str = Input(description="The prompt", default=DEFAULT_POSITIVE_PROMPT),
         image: Path = Input(description="The image for image to image or as the base for inpainting (Will be scaled then cropped to the set width and height)", default=None),
         mask: Path = Input(description="The mask for inpainting, white areas will be modified and black preserved (Will be scaled then cropped to the set width and height)", default=None),
@@ -115,16 +135,14 @@ class Predictor(BasePredictor):
         lora_scale: float = Input(description="Lora scale for all loras in weighting prompts the <lora:url:1.0> 1.0 will be ignored only lora_scale will be applied", default=1.0),
         prompt_emebding: bool = Input(description="if to enable 77+ token support by converting to embeds otherwise will use previous prompt/neg prompts.", default=False),
         hiresfix: bool = Input(description="If to use hiresfix", default=False),
-        # --- Debug: Use static choices for schema validation ---
         hiresfix_model: str = Input(
             description="URI or local path to the RealESRGAN model weights for hiresfix. Choose from available upscale models.",
             default=DEFAULT_UPSCALE_MODEL,
-            choices=[DEFAULT_UPSCALE_MODEL] if DEFAULT_UPSCALE_MODEL else ["placeholder-upscaler"] # Static list for debug
+            choices=UPSCALE_MODELS,
         ),
-        # --- End Debug ---
         hiresfix_scale: float = Input(description="The scale factor for the hiresfix model", default=4),
         face_restoration: bool = Input(description="Apply GFPGAN-based face restoration for enhanced facial details", default=False),
-        gfpgan_model: str = Input(description="Path or URL to the GFPGAN model weights", default="gfpgan/GFPGANv1.4.pth"),
+        gfpgan_model: str = Input(description="Path or URL to the GFPGAN model weights", default="gfpgan/weights/GFPGANv1.4.pth"),
         compress_level: int = Input(
             description="PNG compression level (0 = no compression, 9 = maximum compression)",
             default=6,
@@ -135,8 +153,6 @@ class Predictor(BasePredictor):
             description="Enable PNG optimization during saving. Disable this to skip optimization.",
             default=True,
         ),
-        use_refiner: bool = Input(description="Enable SDXL Refiner model (Disables hires fix, img2img, and inpainting)", default=False),
-        high_noise_frac: float = Input(description="Fraction of steps for base model when using refiner (e.g., 0.8 means base runs for 80% of steps)", default=0.8, ge=0, le=1),
     ) -> list[Path]:
         if prompt == "__ignore__":
             return []
@@ -146,42 +162,7 @@ class Predictor(BasePredictor):
         prompt = parse_weights(prompt)    
         negative_prompt = parse_weights(negative_prompt)
         
-        # --- Initialize GFPGANer if requested ---
-        gfpganer = None
-        if face_restoration:
-            if not os.path.exists(gfpgan_model):
-                 print(f"Warning: GFPGAN model file not found at {gfpgan_model}. Disabling face restoration.")
-                 face_restoration = False # Disable if model not found
-            else:
-                try:
-                    # Assume RealESRGAN isn't needed as a background upsampler here
-                    # You might need to adjust upscale/arch based on the specific GFPGAN model if not v1.4
-                    gfpganer = GFPGANer(
-                        model_path=gfpgan_model,
-                        upscale=1, # Typically 1 when used for restoration only
-                        arch='clean', # or 'original'
-                        channel_multiplier=2,
-                        bg_upsampler=None 
-                    )
-                    print("GFPGAN face restoration is enabled and initialized.")
-                except Exception as e:
-                    print(f"Warning: Failed to initialize GFPGANer. Disabling face restoration. Error: {e}")
-                    face_restoration = False # Disable on error
-        # --- End GFPGAN Init ---
-
-        # --- Refiner Conflict Check ---
-        should_use_refiner = use_refiner
-        if use_refiner:
-            if hiresfix:
-                print("Warning: Hires fix is enabled, disabling SDXL Refiner.")
-                should_use_refiner = False
-            elif image:
-                print("Warning: Image input (img2img/inpainting) detected, disabling SDXL Refiner.")
-                should_use_refiner = False
-            elif not self.pipelines.refiner_pipeline:
-                 print("Warning: Refiner requested but not loaded/available, disabling SDXL Refiner.")
-                 should_use_refiner = False
-        # --- End Refiner Check ---
+            
             
         gen_kwargs = {
             "guidance_scale": cfg_scale, "guidance_rescale": guidance_rescale,
@@ -242,42 +223,9 @@ class Predictor(BasePredictor):
                 seed = random.randint(0, 2147483647)
             gen_kwargs["generator"] = torch.Generator(device="cuda").manual_seed(seed)
             print("Using seed:", seed)
-            
-            # --- Main Generation Logic ---
-            if should_use_refiner:
-                 print(f"Using Refiner: Base steps {int(steps * high_noise_frac)}, Refiner steps {steps - int(steps * high_noise_frac)}")
-                 # Base model pass (output latents)
-                 gen_kwargs["output_type"] = "latent"
-                 gen_kwargs["num_inference_steps"] = int(steps * high_noise_frac)
-                 latents = pipeline(**gen_kwargs).images
-                 
-                 # Refiner pass
-                 refiner_kwargs = {
-                     "prompt": prompt,
-                     "negative_prompt": negative_prompt,
-                     "num_inference_steps": steps, # Refiner needs total steps AFAIK, but denoising starts from high_noise_frac
-                     "denoising_start": high_noise_frac, # Specify where refiner takes over
-                     "image": latents, # Pass latents from base
-                     "generator": gen_kwargs["generator"], # Reuse generator for consistency
-                     "num_images_per_prompt": batch_size,
-                 }
-                 # Use embeddings if calculated earlier
-                 if prompt_emebding:
-                    refiner_kwargs["prompt_embeds"] = gen_kwargs["prompt_embeds"]
-                    refiner_kwargs["negative_prompt_embeds"] = gen_kwargs["negative_prompt_embeds"]
-                    refiner_kwargs["pooled_prompt_embeds"] = gen_kwargs["pooled_prompt_embeds"]
-                    refiner_kwargs["negative_pooled_prompt_embeds"] = gen_kwargs["negative_pooled_prompt_embeds"]
-                    refiner_kwargs.pop("prompt", None)
-                    refiner_kwargs.pop("negative_prompt", None)
-                    
-                 imgs = self.pipelines.refiner_pipeline(**refiner_kwargs).images
-            
-            elif not hiresfix:
-                 # Standard txt2img/img2img/inpainting without refiner or hires fix
-                 gen_kwargs["output_type"] = "pil" # Ensure PIL output if not using refiner/latents
-                 imgs = pipeline(**gen_kwargs).images
+            if not hiresfix:
+                imgs = pipeline(**gen_kwargs).images
             else:
-                # --- Hires Fix Logic (largely unchanged) ---
                 # Step 1: Use the passed image if provided, otherwise generate a full-resolution image.
                 if image is not None:
                     full_res_img = Image.open(str(image))
@@ -290,7 +238,7 @@ class Predictor(BasePredictor):
                 # Prepare the RealESRGAN (hiresfix) upsampler.
                 if not os.path.exists(hiresfix_model):
                     raise FileNotFoundError(f"Upscaler weight file not found: {hiresfix_model}")
-                backbone_model, netscale = get_upscale_backbone(os.path.splitext(os.path.basename(hiresfix_model))[0]) # Derive from filename
+                backbone_model, netscale = get_upscale_backbone("RealESRGAN_x4plus_anime_6B")
                 upsampler = RealESRGANer(
                     scale=netscale,
                     model_path=hiresfix_model,
@@ -299,10 +247,23 @@ class Predictor(BasePredictor):
                     tile=0,
                     tile_pad=10,
                     pre_pad=0,
-                    half=self.torch_dtype == torch.float16, # Set based on torch_dtype
+                    half=False,  # Set to True for FP16 precision if desired.
                     gpu_id=0
                 )
                 
+                # Initialize GFPGAN if face restoration is enabled.
+                if face_restoration:
+                    if not os.path.exists(gfpgan_model):
+                        raise FileNotFoundError(f"GFPGAN model file not found: {gfpgan_model}")
+                    gfpganer = GFPGANer(
+                        model_path=gfpgan_model,
+                        upscale=1,  # No additional scaling is applied.
+                        arch="clean", 
+                        channel_multiplier=2,
+                        bg_upsampler=None  # Optionally, you can set bg_upsampler=upsampler if desired.
+                    )
+                    print("GFPGAN face restoration is enabled.")
+
                 fixed_imgs = []
                 for full_img in full_res_imgs:
                     # Step 2: Downscale the full-resolution image to a lower resolution.
@@ -332,28 +293,20 @@ class Predictor(BasePredictor):
                     refine_pipeline = AutoPipelineForImage2Image.from_pipe(pipeline)
                     refined_img = refine_pipeline(**refine_kwargs)["images"][0]
 
-                    fixed_imgs.append(refined_img)
-                imgs = fixed_imgs
-
-            # --- Apply GFPGAN if enabled (Runs after all generation types) ---
-            if face_restoration and gfpganer:
-                print("Applying GFPGAN face restoration to final images...")
-                restored_imgs = []
-                for img in imgs:
-                    try:
-                        _, _, restored_img_np = gfpganer.enhance(
-                            np.array(img.convert('RGB')), # Ensure RGB
+                    # Optionally apply GFPGAN face restoration.
+                    if face_restoration:
+                        # GFPGANer.enhance returns a tuple (cropped_faces, restored_faces, output)
+                        _, _, refined_img_np = gfpganer.enhance(
+                            np.array(refined_img),
                             has_aligned=False,
                             only_center_face=False,
                             paste_back=True
                         )
-                        restored_img = Image.fromarray(restored_img_np)
-                        restored_imgs.append(restored_img)
-                    except Exception as e:
-                        print(f"Warning: GFPGAN enhance failed for an image. Skipping. Error: {e}")
-                        restored_imgs.append(img) # Keep original if enhance fails
-                imgs = restored_imgs # Replace original list with restored list
-            # --- End GFPGAN Application ---
+                        refined_img = Image.fromarray(refined_img_np)
+                        print("GFPGAN face restoration applied.")
+
+                    fixed_imgs.append(refined_img)
+                imgs = fixed_imgs
 
             image_paths = []
             # Import the metadata writing utility.
@@ -388,9 +341,6 @@ class Predictor(BasePredictor):
                     "blur_factor": blur_factor,
                     "prepend_preprompt": prepend_preprompt,
                     "prompt_emebding": prompt_emebding,
-                    # Add refiner status to metadata
-                    "refiner_enabled": should_use_refiner, 
-                    "refiner_high_noise_frac": high_noise_frac if should_use_refiner else None,
                     # Add additional parameters you'd like to track.
                 }
                 utils.write_generation_metadata(Path(img_file_path), metadata)
@@ -401,7 +351,6 @@ class Predictor(BasePredictor):
 class SDXLMultiPipelineHandler:
 
     def __init__(self, model_name_obj_dict, vaes_dir_path, vae_names, textual_inversion_paths, torch_dtype, cpu_offload_inactive_models):
-        print("--- SDXLMultiPipelineHandler: Initializing ---") # Debug
         self.model_name_obj_dict = model_name_obj_dict
         self.model_pipeline_dict = {} # Key = Model's name(str), Value = StableDiffusionXLPipeline instance.
         self.vaes_dir_path = vaes_dir_path
@@ -409,22 +358,11 @@ class SDXLMultiPipelineHandler:
         self.textual_inversion_paths = textual_inversion_paths
         self.torch_dtype = torch_dtype
         self.cpu_offload_inactive_models = cpu_offload_inactive_models
-        self.refiner_pipeline = None # Placeholder for refiner
 
-        print("--- SDXLMultiPipelineHandler: Starting VAE loading ---") # Debug
         self._load_all_vaes() # Must load VAEs before models.
-        print("--- SDXLMultiPipelineHandler: Finished VAE loading ---") # Debug
-        
-        print("--- SDXLMultiPipelineHandler: Starting Model loading ---") # Debug
         self._load_all_models()
-        print("--- SDXLMultiPipelineHandler: Finished Model loading ---") # Debug
-        
-        print("--- SDXLMultiPipelineHandler: Starting Refiner loading ---") # Debug
-        self._load_refiner() # Load the refiner model
-        print("--- SDXLMultiPipelineHandler: Finished Refiner loading ---") # Debug
 
         self.activated_model = None
-        print("--- SDXLMultiPipelineHandler: Initialization Complete ---") # Debug
 
     def get_pipeline(self, model_name, vae_name, scheduler_name):
         # __init__ function guarantees all models and VAEs to be loaded.
@@ -446,20 +384,9 @@ class SDXLMultiPipelineHandler:
             self.activated_model = model_name
 
         pipeline.to("cuda")
-        # Explicitly enable xformers memory efficient attention
-        try:
-            pipeline.enable_xformers_memory_efficient_attention()
-            print(f"xformers memory efficient attention enabled for {model_name}.")
-        except Exception as e:
-            print(f"Warning: Could not enable xformers memory efficient attention for {model_name}. Is xformers installed? Error: {e}")
-        
+        pipeline = _compile_pipeline_for_speed(pipeline)
         pipeline.vae = vae
         pipeline.scheduler = SDXLCompatibleSchedulers.create_instance(scheduler_name)
-        
-        # Also ensure refiner is on cuda if base model is activated
-        if self.refiner_pipeline:
-             self.refiner_pipeline.to("cuda")
-             
         return pipeline
 
     # Load all VAEs to GPU(CUDA).
@@ -488,43 +415,13 @@ class SDXLMultiPipelineHandler:
     def _load_model(self, model_name, model_for_loading, clip_l_list, clip_g_list, activation_token_list):
         pipeline = AutoPipelineForText2Image.from_pipe(model_for_loading.load(torch_dtype=self.torch_dtype, add_watermarker=False), enable_pag=True)
         utils.apply_textual_inversions_to_sdxl_pipeline(pipeline, clip_l_list, clip_g_list, activation_token_list)
-        
-
         vae = pipeline.vae
         pipeline.vae = None
         vae.enable_slicing()
         vae.enable_tiling()
+        vae.to("cuda")
         self.vae_obj_dict[model_name] = vae
         return pipeline
-
-    def _load_refiner(self):
-        """Loads the SDXL Refiner model."""
-        # --- Add check for default model pipeline existence ---
-        if DEFAULT_MODEL not in self.model_pipeline_dict or not self.model_pipeline_dict[DEFAULT_MODEL]:
-            print(f"Warning: Default model ({DEFAULT_MODEL}) pipeline not found or failed to load. Cannot load Refiner.")
-            self.refiner_pipeline = None
-            return
-        # --- End check ---
-        
-        try:
-            print("Loading SDXL Refiner model...")
-            # Reuse components from the *loaded* default model pipeline
-            refiner = DiffusionPipeline.from_pretrained(
-                "stabilityai/stable-diffusion-xl-refiner-1.0",
-                text_encoder_2=self.model_pipeline_dict[DEFAULT_MODEL].text_encoder_2, # Reuse text encoder 2
-                vae=self.vae_obj_dict[DEFAULT_MODEL], # Get VAE object stored during base model loading
-                torch_dtype=self.torch_dtype,
-                use_safetensors=True,
-                variant="fp16" if self.torch_dtype == torch.float16 else None # Use fp16 variant if appropriate
-            )
-
-            if not self.cpu_offload_inactive_models:
-                refiner.to("cuda")
-            self.refiner_pipeline = refiner
-            print("SDXL Refiner model loaded successfully.")
-        except Exception as e:
-            print(f"Warning: Failed to load SDXL Refiner model. Refiner will be unavailable. Error: {e}")
-            self.refiner_pipeline = None
 
 # For RealESRGAN_x4plus_anime_6B, create the backbone architecture
 def get_upscale_backbone(model_name: str):
