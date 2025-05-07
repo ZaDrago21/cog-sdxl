@@ -27,6 +27,8 @@ build:
     - gfpgan
     - safetensors
     - requests
+    - triton
+    - ninja
   # commands run after the environment is setup
   run:
     - "pip3 install -U scipy && pip3 cache purge"
